@@ -64,7 +64,7 @@ except Exception as e:
 
 try:
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+    gemini_model = genai.GenerativeModel('gemini-flash-latest')
 except Exception as e:
     st.error(f"Error initializing Gemini. Is your GOOGLE_API_KEY correct? Error: {e}")
     st.stop()
@@ -544,7 +544,7 @@ with col1:
     
     participants_input = st.text_area(
         "Known Participants (Teach the AI)", 
-        value="Client's Exact Name (Client)\niFoundries Exact Name (iFoundries)",
+        value="Client's Exact Name (Client)\nCompany's Representative Exact Name (Company)",
         help="The AI will read this to match 'Speaker 1' to these names."
     )
     
