@@ -32,7 +32,6 @@ from docx.shared import Pt, Inches
 # -----------------------------------------------------
 
 # --- Google Config ---
-# We provide a default value, but it will be overridden by st.secrets
 GCS_BUCKET_NAME = st.secrets.get("GCS_BUCKET_NAME", "default-bucket-name")
 DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "default-folder-id")
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
