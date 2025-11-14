@@ -28,10 +28,10 @@ from docx.shared import Pt, Inches
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
+#    (We now load these from st.secrets)
 # -----------------------------------------------------
 
 # --- Google Config ---
-# This code is already in your app.py
 GCS_BUCKET_NAME = st.secrets.get("GCS_BUCKET_NAME", "ai-notes-app-laraq-18")
 DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "1YydKO-bAs-4WhiBJ0iAwuQNf3j_ElYTX")
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
@@ -49,9 +49,10 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (your-email@example.c
 
 
 # -----------------------------------------------------
-# 2. API CLIENTS SETUP
+# 2. API CLIENTS SETUP (NOW USING ST.SECRETS)
 # -----------------------------------------------------
 try:
+    # Get the service account JSON from secrets
     sa_creds_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     sa_creds = service_account.Credentials.from_service_account_info(sa_creds_info)
     
@@ -76,18 +77,22 @@ def get_drive_service():
     Google Drive credentials.
     """
     try:
-        # Get client secret info and refresh token
-        client_config_str = st.secrets["GDRIVE_CLIENT_SECRET_JSON"] # This will be the full text of client_secret.json
+        # Get client secret info and refresh token from secrets
+        client_config_str = st.secrets["GDRIVE_CLIENT_SECRET_JSON"]
         client_config = json.loads(client_config_str)
         refresh_token = st.secrets["GDRIVE_REFRESH_TOKEN"]
 
-        # Create credentials object
+        # --- THIS IS THE FIX ---
+        # Your JSON is for "installed" not "web"
+        creds_data = client_config["installed"] 
+        # --- END FIX ---
+
         creds = Credentials.from_authorized_user_info(
             {
-                "client_id": client_config["web"]["client_id"],
-                "client_secret": client_config["web"]["client_secret"],
+                "client_id": creds_data["client_id"],
+                "client_secret": creds_data["client_secret"],
                 "refresh_token": refresh_token,
-                "token_uri": client_config["web"]["token_uri"],
+                "token_uri": creds_data["token_uri"],
             }
         )
         
