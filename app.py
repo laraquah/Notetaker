@@ -64,7 +64,7 @@ except Exception as e:
 
 try:
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-flash-latest')
+    gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 except Exception as e:
     st.error(f"Error initializing Gemini. Is your GOOGLE_API_KEY correct? Error: {e}")
     st.stop()
