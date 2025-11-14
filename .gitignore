@@ -1,0 +1,9 @@
+# Secret files
+credentials.json
+client_secret.json
+token.pickle
+basecamp_token.pickle
+
+# Python cache
+__pycache__/
+*.pyc
