@@ -6,7 +6,8 @@ import io
 import time
 import subprocess
 import pickle
-import json # New import
+import json
+import datetime # --- NEW IMPORT ---
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -15,20 +16,20 @@ import google.generativeai as genai
 
 # Import Google Auth & Drive Libraries
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow 
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 
-# --- NEW: Import Basecamp & formatting tools ---
+# --- Import Basecamp & formatting tools ---
 import requests
 from requests_oauthlib import OAuth2Session
 from docx.shared import Pt, Inches
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
-#    (We now load these from st.secrets)
+#    (Loaded from st.secrets)
 # -----------------------------------------------------
 
 # --- Google Config ---
@@ -49,7 +50,7 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (your-email@example.c
 
 
 # -----------------------------------------------------
-# 2. API CLIENTS SETUP (NOW USING ST.SECRETS)
+# 2. API CLIENTS SETUP
 # -----------------------------------------------------
 try:
     # Get the service account JSON from secrets
@@ -64,28 +65,20 @@ except Exception as e:
 
 try:
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-flash-latest')
+    gemini_model = genai.GenerativeModel('gemini-flash-latest') 
 except Exception as e:
     st.error(f"Error initializing Gemini. Is your GOOGLE_API_KEY correct? Error: {e}")
     st.stop()
 
-# --- NEW Google Drive Service (using Refresh Token) ---
+# --- Google Drive Service ---
 @st.cache_resource
 def get_drive_service():
-    """
-    This function uses a permanent refresh token from st.secrets to get
-    Google Drive credentials.
-    """
     try:
-        # Get client secret info and refresh token from secrets
         client_config_str = st.secrets["GDRIVE_CLIENT_SECRET_JSON"]
         client_config = json.loads(client_config_str)
         refresh_token = st.secrets["GDRIVE_REFRESH_TOKEN"]
 
-        # --- THIS IS THE FIX ---
-        # Your JSON is for "installed" not "web"
         creds_data = client_config["installed"] 
-        # --- END FIX ---
 
         creds = Credentials.from_authorized_user_info(
             {
@@ -96,7 +89,6 @@ def get_drive_service():
             }
         )
         
-        # Refresh the credentials if they are expired
         if not creds.valid:
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
@@ -112,14 +104,9 @@ def get_drive_service():
 drive_service = get_drive_service()
 
 
-# --- NEW: Basecamp Service (Refresh Token Method) ---
+# --- Basecamp Service ---
 @st.cache_resource
 def get_basecamp_session():
-    """
-    This function uses a permanent refresh token from st.secrets to get a new
-    access token every time the app starts.
-    """
-    # We use a temporary file path for the pickle in the cloud
     token_pickle_path = "/tmp/basecamp_token.pickle"
     token = None
     
@@ -157,7 +144,7 @@ def get_basecamp_session():
         st.stop()
 
 # -----------------------------------------------------
-# 3. HELPER FUNCTIONS (Unchanged)
+# 3. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def upload_to_gcs(file_path, destination_blob_name):
@@ -240,11 +227,11 @@ def upload_bc_attachment(_session, file_bytes, file_name):
         )
         upload_response.raise_for_status()
         response_json = upload_response.json()
+        # Correct key found via debug
         return response_json['attachable_sgid']
     
     except KeyError:
         st.error("Basecamp Upload Error: 'attachable_sgid' key not found in response.")
-        st.json(upload_response.json()) 
         return None
     except Exception as e:
         st.error(f"Basecamp Upload Error: {e}")
@@ -257,6 +244,7 @@ def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
         description_html = "" 
         
         if attachment_sgid:
+            # Embedding attachment in the description (Notes section)
             attachment_html = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>'
             description_html = attachment_html 
 
@@ -272,76 +260,46 @@ def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
         return True
     except Exception as e:
         st.error(f"Basecamp To-Do Creation Error: {e}")
-        st.error("Full Error:" + str(e))
         return False
 
 def add_formatted_text(cell, text):
-    """
-    Parses the AI's text and applies formatting (underline, bullets)
-    to the Word document cell.
-    """
+    """Applies smart formatting to Word cells."""
     cell.text = ""
-    
     lines = text.split('\n')
-    
     for line in lines:
         line = line.strip()
         if not line:
             continue
-
         p = cell.add_paragraph()
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
         
-        # Check for Section Title (e.g., ## DISCUSSION ##)
         if line.startswith('##') and line.endswith('##'):
             clean_title = line.strip('#').strip()
             run = p.add_run(clean_title)
             run.underline = True
-            run.bold = False # Per your request
+            run.bold = False
             p.paragraph_format.space_before = Pt(12)
             p.paragraph_format.space_after = Pt(4)
-        
-        # Check for a bullet point (e.g., * The point...)
         elif line.startswith('*'):
-            clean_text = line.lstrip('*').lstrip("•").strip() # This is good
+            clean_text = line.lstrip('*').lstrip("•").strip()
             
-            # --- THIS IS THE FIX for **Title:** ---
-            # Check for the bold prefix format (e.g., "**Content:** Text...")
             if clean_text.startswith('**') and ':**' in clean_text:
                 try:
-                    # Split at the ':**'
                     parts = clean_text.split(':**', 1)
-                    # Title is part[0], removing the opening '**'
                     title = parts[0].lstrip('**').strip()
-                    # Text is the rest
                     text = parts[1].strip()
-                    
-                    # Add the bullet symbol first, without indentation
                     p.text = "•\t"
-                    
-                    # Add the BOLD title
                     run = p.add_run(f"{title}: ")
                     run.bold = True
-                    
-                    # Add the rest of the text (not bold)
                     p.add_run(text)
-                    
-                    # Indent the whole paragraph
                     p.paragraph_format.left_indent = Inches(0.25)
-
-                except Exception as e:
-                    # Fallback for weird formatting
+                except:
                     p.text = f"•\t{clean_text}"
                     p.paragraph_format.left_indent = Inches(0.25)
-            
-            # Original logic for plain bullets
             elif clean_text:
                 p.text = f"•\t{clean_text}" 
                 p.paragraph_format.left_indent = Inches(0.25)
-            # --- END OF FIX ---
-        
-        # Handle plain text
         else:
             p.add_run(line)
 
@@ -353,20 +311,17 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
     flac_file_path = ""
     flac_blob_name = ""
     try:
-        # 1. Convert to FLAC
         with st.spinner(f"Converting {file_name} to audio-only FLAC..."):
             base_name = os.path.splitext(audio_file_path)[0]
             flac_file_path = f"{base_name}.flac"
             command = ["ffmpeg", "-i", audio_file_path, "-vn", "-acodec", "flac", "-y", flac_file_path]
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 2. Upload to GCS
         with st.spinner(f"Uploading converted audio to Google Cloud Storage..."):
             flac_blob_name = f"{os.path.splitext(file_name)[0]}.flac"
             gcs_uri = upload_to_gcs(flac_file_path, flac_blob_name)
             if not gcs_uri: return {"error": "Upload failed."}
 
-        # 3. Transcribe
         progress_text = "Transcribing & identifying speakers: 0% Complete"
         progress_bar = st.progress(0, text=progress_text)
         
@@ -412,49 +367,30 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         if not full_transcript_text.strip():
             full_transcript_text = " ".join([result.alternatives[0].transcript for result in response.results])
 
-        # --- NEW ERROR CHECK 1 ---
-        if not full_transcript_text.strip():
-            return {"error": "Transcription succeeded but produced an empty transcript."}
-        # --- END CHECK ---
-
-        # 4. Summarize (The Smart Part)
         with st.spinner("Analyzing conversation & matching names..."):
-            
             prompt = f"""
             You are an expert meeting secretary. 
-            
             Here is the context of who was in the meeting:
             {participants_context}
-            
             The transcript below uses "Speaker 1", "Speaker 2", etc.
             Your job is to figure out which Speaker matches which Name from the list above.
-            
             Transcript:
             {full_transcript_text}
-            
             ---
             YOUR TASKS:
-            
             1. RECONSTRUCTION: When writing the notes, DO NOT use "Speaker 1". Use their REAL NAMES (e.g., "John said...").
-            
             2. EXTRACTION:
-            
             ## DISCUSSION ##
             Summarize main points using the real names.
             FORMAT:
             ## Section Title (e.g., ## Content and Grammar)
             * **Wording & Tone:** John requested avoiding the casual use of "You are".
-            * **Navigation:** John insisted that the entire product image be clickable.
             * Bullet point 3.
-            
             (Leave a blank line between sections)
-            
             ## NEXT STEPS ##
             List action items using the real names.
             FORMAT:
             * Bullet point 1.
-            * Bullet point 2.
-            
             ## CLIENT REQUESTS ##
             List specific questions or requests asked BY the Client.
             FORMAT:
@@ -462,20 +398,8 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             """
             
             response = gemini_model.generate_content(prompt)
+            text = response.text
             
-            # --- NEW ERROR CHECK 2 ---
-            try:
-                text = response.text
-            except Exception as e:
-                st.error(f"Gemini AI error: {e}")
-                st.error("This usually means the GOOGLE_API_KEY is invalid or the Gemini API blocked the response for safety reasons.")
-                return {"error": "Failed to get a response from the AI."}
-            
-            if not text.strip():
-                return {"error": "AI analysis succeeded but returned an empty response."}
-            # --- END CHECK ---
-            
-            # Robust Parsing
             discussion = ""
             next_steps = ""
             client_reqs = ""
@@ -487,7 +411,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                         discussion = text[discussion_start:discussion_end].strip()
                     else:
                         discussion = text[discussion_start:].strip()
-                
                 if "## NEXT STEPS ##" in text:
                     next_steps_start = text.find("## NEXT STEPS ##")
                     if "## CLIENT REQUESTS ##" in text:
@@ -495,16 +418,12 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                         next_steps = text[next_steps_start:next_steps_end].strip()
                     else:
                         next_steps = text[next_steps_start:].strip()
-                
                 if "## CLIENT REQUESTS ##" in text:
                     client_reqs_start = text.find("## CLIENT REQUESTS ##")
                     client_reqs = text[client_reqs_start:].strip()
-                
                 if not discussion and not next_steps:
                     discussion = text
-                    
             except Exception as e:
-                st.error(f"Error parsing AI response: {e}")
                 discussion = text
                 next_steps = "Parsing failed."
                 client_reqs = "Parsing failed."
@@ -520,7 +439,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         if 'progress_bar' in locals(): progress_bar.empty()
         return {"error": str(e)}
     finally:
-        # --- 5. Clean up ---
         try:
             if os.path.exists(audio_file_path): os.remove(audio_file_path)
             if os.path.exists(flac_file_path): os.remove(flac_file_path)
@@ -528,26 +446,34 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             blob = bucket.blob(flac_blob_name)
             blob.delete()
         except: pass
+
 # -----------------------------------------------------
 # 5. STREAMLIT UI
 # -----------------------------------------------------
-st.set_page_config(layout="wide")
-st.title("🤖 AI Meeting Minutes (Smart Name Recognition)")
+st.set_page_config(layout="wide", page_title="AI Meeting Manager")
+st.title("🤖 AI Meeting Manager")
 
 if 'ai_results' not in st.session_state:
     st.session_state.ai_results = {"discussion": "", "next_steps": "", "client_reqs": "", "full_transcript": ""}
 
-col1, col2 = st.columns([1, 2])
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-with col1:
+# --- Init Reps State ---
+if "auto_client_reps" not in st.session_state:
+    st.session_state.auto_client_reps = ""
+if "auto_ifoundries_reps" not in st.session_state:
+    st.session_state.auto_ifoundries_reps = ""
+
+tab1, tab2, tab3 = st.tabs(["1. Analyze Audio", "2. Review & Export", "3. Chat with Meeting"])
+
+with tab1:
     st.header("1. Analyze Audio")
-    
     participants_input = st.text_area(
         "Known Participants (Teach the AI)", 
-        value="Client's Exact Name (Client)\nCompany's Representative Exact Name (Company)",
-        help="The AI will read this to match 'Speaker 1' to these names."
+        value="Client's Exact Name (Client)\niFoundries Exact Name (iFoundries)",
+        help="The AI will read this to match 'Speaker 1' to these names. It will also auto-fill the rep fields in Tab 2!"
     )
-    
     uploaded_file = st.file_uploader("Upload Meeting (MP3/MP4)", type=["mp3", "mp4", "m4a", "wav"])
     
     if st.button("Analyze Audio"):
@@ -556,116 +482,109 @@ with col1:
                 tmp.write(uploaded_file.getvalue())
                 path = tmp.name
             
+            st.session_state.chat_history = [] 
+            
+            # --- NEW: Auto-Parse Reps ---
+            c_list = []
+            i_list = []
+            for line in participants_input.split('\n'):
+                line = line.strip()
+                if "(Client)" in line:
+                    clean_name = line.replace("(Client)", "").strip()
+                    c_list.append(clean_name)
+                elif "(iFoundries)" in line:
+                    clean_name = line.replace("(iFoundries)", "").strip()
+                    i_list.append(clean_name)
+            
+            st.session_state.auto_client_reps = "\n".join(c_list)
+            st.session_state.auto_ifoundries_reps = ", ".join(i_list)
+            # --- END Parsing ---
+
             res = get_structured_notes_google(path, uploaded_file.name, participants_input)
             
             if "error" in res:
                 st.error(res["error"])
             else:
                 st.session_state.ai_results = res
-                st.success("Done! Review the named notes on the right.")
+                st.success("Done! Review notes in Tab 2 or Chat in Tab 3.")
         else:
             st.warning("Please upload a file first.")
 
-with col2:
+with tab2:
     st.header("2. Review Notes")
     
     st.subheader("Manual Fields (For .docx Template)")
     row1_col1, row1_col2 = st.columns(2)
+    
+    # --- NEW: Date/Time Pickers & Auto-Fill ---
     with row1_col1:
-        date = st.text_input("Date :red[*]")
+        date_obj = st.date_input("Date :red[*]", datetime.date.today())
         venue = st.text_input("Venue")
-        client_rep = st.text_area("Client Reps :red[*]", height=70)
+        # Auto-filled from session state
+        client_rep = st.text_area("Client Reps :red[*]", value=st.session_state.auto_client_reps, height=70)
         absent = st.text_input("Absent")
+    
     with row1_col2:
-        time_str = st.text_input("Time") 
+        time_obj = st.text_input("Time", datetime.datetime.now().strftime("%I:%M %p")) # Text input is cleaner for manual override if needed, but pre-filled
         prepared_by = st.text_input("Prepared by :red[*]")
-        ifoundries_rep = st.text_input("iFoundries Reps")
+        # Auto-filled from session state
+        ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
+    
+    # Convert date/time objects to strings for Docx
+    date_str = date_obj.strftime("%d %B %Y") # e.g. 12 November 2024
+    time_str = time_obj # Keep text input value
+    # --- END NEW UI ---
 
     st.subheader("AI Generated Content")
-    st.caption("Review and edit the AI's draft below. This content will be formatted in the Word doc.")
-    
-    discussion_text = st.text_area(
-        "Discussion", 
-        value=st.session_state.ai_results.get("discussion", ""), 
-        height=300
-    )
-    next_steps_text = st.text_area(
-        "Next Steps", 
-        value=st.session_state.ai_results.get("next_steps", ""), 
-        height=200
-    )
-    
-    with st.expander("View Specific Client Requests (For Reference)"):
+    discussion_text = st.text_area("Discussion", value=st.session_state.ai_results.get("discussion", ""), height=300)
+    next_steps_text = st.text_area("Next Steps", value=st.session_state.ai_results.get("next_steps", ""), height=200)
+    with st.expander("View Specific Client Requests"):
         st.text_area("Client Requests", value=st.session_state.ai_results.get("client_reqs", ""), height=150)
     
     st.header("3. Generate & Upload")
     
-    # --- NEW: Basecamp UI ---
-    
-    # We create variables to hold the selected Basecamp values
     bc_session = None
     bc_project_id = None
     bc_todolist_id = None
     bc_todo_title = ""
 
     do_drive = st.checkbox("Upload to Drive", value=True)
-    do_basecamp = st.checkbox("Upload to Basecamp") # <-- NEW
+    do_basecamp = st.checkbox("Upload to Basecamp") 
 
     if do_basecamp:
-        # This will call the new refresh token function
         bc_session = get_basecamp_session()
-        
         if bc_session:
             try:
                 projects_list = get_basecamp_projects(bc_session)
                 if not projects_list:
                     st.warning("No active Basecamp projects found.")
                 else:
-                    selected_project_name = st.selectbox(
-                        "Select Basecamp Project",
-                        options=[p[0] for p in projects_list],
-                        index=None,
-                        placeholder="Choose a project..."
-                    )
+                    selected_project_name = st.selectbox("Select Basecamp Project", options=[p[0] for p in projects_list], index=None, placeholder="Choose a project...")
                     
                     if selected_project_name:
                         bc_project_id = next(p[1] for p in projects_list if p[0] == selected_project_name)
                         todolists_list = get_basecamp_todolists(bc_session, bc_project_id)
                         
                         if not todolists_list:
-                            st.warning("No to-do lists found in this project. (Or the tool is disabled)")
+                            st.warning("No to-do lists found.")
                         else:
-                            selected_todolist_name = st.selectbox(
-                                "Select To-Do List",
-                                options=[tl[0] for tl in todolists_list], # Use title for name
-                                index=None,
-                                placeholder="Choose a to-do list..."
-                            )
+                            selected_todolist_name = st.selectbox("Select To-Do List", options=[tl[0] for tl in todolists_list], index=None, placeholder="Choose a to-do list...")
                             
                             if selected_todolist_name:
-                                bc_todolist_id = next(tl[1] for tl in todolists_list if tl[0] == selected_todolist_name) # Use id
+                                bc_todolist_id = next(tl[1] for tl in todolists_list if tl[0] == selected_todolist_name)
                                 bc_todo_title = st.text_input("To-Do Title :red[*]")
-                                
-                                # --- THIS IS THE STATIC NOTIFICATION YOU REQUESTED ---
-                                if date:
-                                    default_fname = f"Minutes_{date}.docx"
-                                    st.info(f"📎 {default_fname} will be attached to the 'Notes' of this to-do.")
+                                if date_str:
+                                    st.info(f"📎 Minutes_{date_str}.docx will be attached to the 'Notes' of this to-do.")
                                 else:
-                                    st.info("📎 The generated .docx will be attached to the 'Notes' of this to-do. (Please fill in the 'Date' field to see the filename).")
-            
+                                    st.info("📎 The generated .docx will be attached to the 'Notes' of this to-do.")
             except Exception as e:
                 st.error(f"Error loading Basecamp data: {e}")
-                st.info("This may be the network error. Please try again.")
-
-    # --- END NEW UI ---
 
     if st.button("Generate Word Doc"):
-        
-        # --- NEW: Basecamp Validation ---
         basecamp_ready = True
         if do_basecamp:
             if not bc_session:
-                st.error("Basecamp is not connected. Please check your refresh token and network.")
+                st.error("Basecamp is not connected.")
                 basecamp_ready = False
             if not bc_project_id or not bc_todolist_id:
                 st.error("Please select a Basecamp project and to-do list.")
@@ -673,38 +592,34 @@ with col2:
             if not bc_todo_title:
                 st.error("Please enter a Basecamp To-Do Title.")
                 basecamp_ready = False
-        # --- END NEW VALIDATION ---
 
-        if not date or not prepared_by or not client_rep:
+        if not date_str or not prepared_by or not client_rep:
             st.error("Missing required fields (*)")
-        elif not do_basecamp or basecamp_ready: # <-- MODIFIED Check
+        elif not do_basecamp or basecamp_ready:
             try:
-                # We must have the .docx template file in the same folder as app.py
                 doc = Document("Minutes Of Meeting - Template.docx")
                 t0 = doc.tables[0]
-                t0.cell(1,1).text = date
+                t0.cell(1,1).text = date_str
                 t0.cell(2,1).text = time_str
                 t0.cell(3,1).text = venue
                 
-                # --- THIS IS THE FIX for Rep Names ---
-                t0.cell(4,1).text = f"{client_rep} (Client)" if client_rep else ""
-                t0.cell(4,2).text = f"{ifoundries_rep} (iFoundries)" if ifoundries_rep else ""
-                # --- END OF FIX ---
+                # Append (Client) / (iFoundries) tags only if not present/empty
+                c_rep_final = f"{client_rep} (Client)" if client_rep and "(Client)" not in client_rep else client_rep
+                i_rep_final = f"{ifoundries_rep} (iFoundries)" if ifoundries_rep and "(iFoundries)" not in ifoundries_rep else ifoundries_rep
                 
+                t0.cell(4,1).text = c_rep_final
+                t0.cell(4,2).text = i_rep_final
                 t0.cell(5,1).text = absent
 
                 t1 = doc.tables[1]
-                
-                # --- Use the smart formatting function ---
                 add_formatted_text(t1.cell(2,1), discussion_text)
                 add_formatted_text(t1.cell(4,1), next_steps_text)
-                
                 doc.paragraphs[-1].text = f"Prepared by: {prepared_by}"
                 
                 bio = io.BytesIO()
                 doc.save(bio)
                 bio.seek(0)
-                fname = f"Minutes_{date}.docx"
+                fname = f"Minutes_{date_str}.docx"
                 
                 if do_drive:
                     with st.spinner("Uploading to Drive..."):
@@ -712,34 +627,61 @@ with col2:
                             st.success("Uploaded to Drive!")
                         else:
                             st.error("Drive upload failed.")
-                    bio.seek(0) # Rewind buffer for next upload
+                    bio.seek(0)
 
-                # --- NEW: Basecamp Upload Logic ---
                 if do_basecamp and basecamp_ready and bc_session:
                     with st.spinner(f"Uploading {fname} to Basecamp..."):
-                        # 1. Upload attachment
                         file_bytes = bio.getvalue()
                         sgid = upload_bc_attachment(bc_session, file_bytes, fname)
                     
                     if sgid:
-                        # --- REMOVED the dynamic "Attached" notification ---
-                        
                         with st.spinner("Creating To-Do in Basecamp..."):
-                            # 2. Create to-do
                             if create_bc_todo(bc_session, bc_project_id, bc_todolist_id, bc_todo_title, sgid):
-                                # This is now the only success message
                                 st.success("Created To-Do in Basecamp!")
                             else:
                                 st.error("Basecamp to-do creation failed.")
                     else:
                         st.error("Basecamp file upload failed.")
-                    bio.seek(0) # Rewind for download button
-                # --- END NEW UPLOAD LOGIC ---
+                    bio.seek(0)
 
                 st.download_button("Download .docx", bio, fname)
                 
-                with st.expander("Full Transcript"):
-                    st.text(st.session_state.ai_results.get("full_transcript", ""))
-
             except Exception as e:
                 st.error(f"Error generating document: {e}")
+
+with tab3:
+    st.header("💬 Chat with your Meeting")
+    transcript_context = st.session_state.ai_results.get("full_transcript", "")
+    
+    if not transcript_context:
+        st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
+    else:
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        if prompt := st.chat_input("Ask a question about the meeting..."):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                try:
+                    full_prompt = f"""
+                    You are a helpful assistant answering questions about a meeting.
+                    RULES:
+                    1. Use the TRANSCRIPT provided below as your ONLY source of truth.
+                    2. If the answer is not in the transcript, say "That was not mentioned in the meeting."
+                    3. Be concise and professional.
+                    
+                    TRANSCRIPT:
+                    {transcript_context}
+                    
+                    USER QUESTION:
+                    {prompt}
+                    """
+                    stream = gemini_model.generate_content(full_prompt, stream=True)
+                    response = st.write_stream(stream)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    st.error(f"An error occurred: {e}")
