@@ -168,7 +168,10 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-flash-latest')
+    
+    # --- UPDATED MODEL TO GEMINI 2.5 FLASH-LITE ---
+    gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
+    
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
     st.stop()
@@ -471,9 +474,7 @@ with tab2:
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
         
-        # --- AUTO FILL PREPARED BY LOGIC ---
-        # Priority 1: The logged-in Basecamp user
-        # Priority 2: The iFoundries rep identified by AI
+        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
         
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
@@ -598,7 +599,6 @@ with tab3:
             st.session_state.chat_history = []
             st.rerun()
 
-        # --- VISUAL FIX: Scrollable Container for Messages ---
         chat_container = st.container(height=500)
         
         with chat_container:
@@ -610,7 +610,6 @@ with tab3:
                     with st.chat_message("assistant", avatar="🤖"):
                         st.markdown(message["content"])
 
-        # --- Chat Input ---
         if prompt := st.chat_input("Ask a question about the meeting..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
