@@ -34,17 +34,13 @@ st.set_page_config(layout="wide", page_title="AI Meeting Manager", page_icon="�
 
 # --- Load App Keys from Secrets ---
 try:
-    # 1. AI Robot Credentials (Shared)
     GCS_BUCKET_NAME = st.secrets["GCS_BUCKET_NAME"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     GCP_SERVICE_ACCOUNT_JSON = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
-    
-    # 2. App Identifiers (For User Login)
     GDRIVE_CLIENT_CONFIG = json.loads(st.secrets["GDRIVE_CLIENT_SECRET_JSON"])
     BASECAMP_CLIENT_ID = st.secrets["BASECAMP_CLIENT_ID"]
     BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
-
 except Exception as e:
     st.error(f"Secrets Configuration Error: {e}")
     st.stop()
@@ -57,11 +53,12 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 BASECAMP_REDIRECT_URI = "https://www.google.com" 
 
 # -----------------------------------------------------
-# 2. HELPER: GET USER IDENTITY
+# 2. HELPER: GET USER IDENTITY (Moved to Top)
 # -----------------------------------------------------
 def fetch_basecamp_name(token_dict):
     """Calls Basecamp Identity API to get the user's real name."""
     try:
+        # We use the Launchpad API to get identity info
         identity_url = "https://launchpad.37signals.com/authorization.json"
         headers = {
             "Authorization": f"Bearer {token_dict['access_token']}",
@@ -124,8 +121,9 @@ with st.sidebar:
     st.subheader("2. Basecamp")
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected")
+        # Show the retrieved name to verify it worked
         if st.session_state.user_real_name:
-            st.caption(f"👤 {st.session_state.user_real_name}")
+            st.caption(f"👤 Logged in as: **{st.session_state.user_real_name}**")
             
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
@@ -141,7 +139,7 @@ with st.sidebar:
         
         if bc_code:
             try:
-                # Manual Token Fetch fix
+                # Manual Token Fetch
                 payload = {
                     "type": "web_server",
                     "client_id": BASECAMP_CLIENT_ID,
@@ -155,7 +153,7 @@ with st.sidebar:
                 
                 st.session_state.basecamp_token = token
                 
-                # Auto-fetch Name
+                # --- THIS IS THE AUTO-NAME LOGIC ---
                 real_name = fetch_basecamp_name(token)
                 if real_name:
                     st.session_state.user_real_name = real_name
@@ -434,7 +432,7 @@ tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
 with tab1:
     st.header("1. Analyze Audio")
     participants_input = st.text_area("Known Participants (Teach the AI)", value="Name (Client)\nName (iFoundries)", help="The AI will read this to match 'Speaker 1' to these names.")
-    uploaded_file = st.file_uploader("Upload Meeting (MP3/MP4)", type=["mp3", "mp4", "m4a", "wav"])
+    uploaded_file = st.file_uploader("Upload Meeting", type=["mp3", "mp4", "m4a", "wav"])
     
     if st.button("Analyze Audio"):
         if uploaded_file:
@@ -474,6 +472,8 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
+        # --- AUTO FILL PREPARED BY ---
+        # We look for the Basecamp name in session state. If it's there, it populates the box.
         default_prepared = st.session_state.user_real_name if "user_real_name" in st.session_state else ""
         prepared_by = st.text_input("Prepared by", value=default_prepared)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
@@ -609,15 +609,15 @@ with tab3:
                 with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(message["content"])
 
-        # User Input
         if prompt := st.chat_input("Ask a question about the meeting..."):
-            # Add user message
+            # 1. Show User Message
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
                 st.markdown(prompt)
 
-            # Generate response
+            # 2. Generate Bot Response
             with st.chat_message("assistant", avatar="🤖"):
+                # Fix for "Not Printing Words" - Simple Generator
                 def stream_text(response_iterator):
                     # Robust generator that ignores empty chunks
                     for chunk in response_iterator:
@@ -625,12 +625,13 @@ with tab3:
                             yield chunk.text
 
                 try:
+                    # --- ENHANCED PROMPT WITH SPEAKER MAPPING ---
                     full_prompt = f"""
                     You are a helpful, professional assistant answering questions about a specific meeting.
                     
                     CONTEXT (WHO IS WHO):
                     {participants_context}
-                    (Use this to identify Speaker 1, Speaker 2, etc.)
+                    (These are the names of the people. Map Speaker 1, Speaker 2 etc. to these names.)
 
                     TRANSCRIPT:
                     {transcript_context}
@@ -641,8 +642,9 @@ with tab3:
                     RULES:
                     1. Use the TRANSCRIPT provided above as your ONLY source of truth.
                     2. ALWAYS refer to speakers by their REAL NAMES from the Context list, not "Speaker 1".
-                    3. If the answer is not in the transcript, simply say "That was not mentioned in the meeting."
-                    4. Keep answers concise and to the point.
+                    3. IF the user asks a general question like "What does the client want?", prioritize the requests made by the person identified as "(Client)" in the context.
+                    4. If the answer is not in the transcript, simply say "That was not mentioned in the meeting."
+                    5. Keep answers concise and to the point.
                     """
                     
                     stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
