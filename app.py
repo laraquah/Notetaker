@@ -62,7 +62,6 @@ BASECAMP_REDIRECT_URI = "https://www.google.com"
 def fetch_basecamp_name(token_dict):
     """Calls Basecamp Identity API to get the user's real name."""
     try:
-        # We use the Launchpad API to get identity info
         identity_url = "https://launchpad.37signals.com/authorization.json"
         headers = {
             "Authorization": f"Bearer {token_dict['access_token']}",
@@ -102,9 +101,6 @@ with st.sidebar:
             st.rerun()
     else:
         try:
-            # Identify if installed or web config
-            config_key = "installed" if "installed" in GDRIVE_CLIENT_CONFIG else "web"
-            
             flow = Flow.from_client_config(
                 GDRIVE_CLIENT_CONFIG,
                 scopes=["https://www.googleapis.com/auth/drive"],
@@ -145,18 +141,13 @@ with st.sidebar:
         
         if bc_code:
             try:
-                # Use direct request to ensure client_id is sent
-                payload = {
-                    "type": "web_server",
-                    "client_id": BASECAMP_CLIENT_ID,
-                    "client_secret": BASECAMP_CLIENT_SECRET,
-                    "redirect_uri": BASECAMP_REDIRECT_URI,
-                    "code": bc_code
-                }
-                response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-                response.raise_for_status()
-                token = response.json()
-                
+                token = bc_oauth.fetch_token(
+                    BASECAMP_TOKEN_URL,
+                    client_id=BASECAMP_CLIENT_ID,
+                    client_secret=BASECAMP_CLIENT_SECRET,
+                    code=bc_code,
+                    type="web_server"
+                )
                 st.session_state.basecamp_token = token
                 
                 # --- AUTO-FETCH NAME ---
@@ -206,7 +197,7 @@ def upload_to_drive_user(file_stream, file_name):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        file_metadata = {"name": file_name} # Uploads to Root Folder
+        file_metadata = {"name": file_name} 
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
@@ -427,6 +418,10 @@ if "auto_client_reps" not in st.session_state:
 if "auto_ifoundries_reps" not in st.session_state:
     st.session_state.auto_ifoundries_reps = ""
 
+# --- NEW: PARTICIPANT CONTEXT STATE ---
+if "saved_participants_input" not in st.session_state:
+    st.session_state.saved_participants_input = ""
+
 st.title("🤖 AI Meeting Manager")
 
 tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
@@ -439,6 +434,11 @@ with tab1:
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name}") as tmp:
                 tmp.write(uploaded_file.getvalue())
                 path = tmp.name
+            
+            st.session_state.chat_history = [] 
+            
+            # --- Save Participant Context for Chat ---
+            st.session_state.saved_participants_input = participants_input
             
             # Auto-fill logic
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
@@ -573,45 +573,55 @@ with tab2:
 
 with tab3:
     st.header("💬 Chat with your Meeting")
+    
+    # Get context from results AND saved participants
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
+    participants_context = st.session_state.saved_participants_input
     
     if not transcript_context:
         st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
     else:
+        # Standard Chat Interface
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
         if prompt := st.chat_input("Ask a question about the meeting..."):
+            # 1. Show User Message
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
+            # 2. Generate Bot Response
             with st.chat_message("assistant"):
-                # --- FIX: Text Stream Generator ---
+                # Fix for "Not Printing Words" - Simple Generator
                 def stream_text(response_iterator):
                     for chunk in response_iterator:
                         if chunk.text:
                             yield chunk.text
 
                 try:
+                    # --- ENHANCED PROMPT WITH MAPPING ---
                     full_prompt = f"""
                     You are a helpful assistant answering questions about a meeting.
-                    RULES:
-                    1. Use the TRANSCRIPT provided below as your ONLY source of truth.
-                    2. If the answer is not in the transcript, say "That was not mentioned in the meeting."
-                    3. Be concise and professional.
                     
+                    CONTEXT (WHO IS WHO):
+                    {participants_context}
+                    (Use this list to identify Speaker 1, Speaker 2, etc.)
+
                     TRANSCRIPT:
                     {transcript_context}
                     
                     USER QUESTION:
                     {prompt}
-                    """
-                    # Create the stream iterator
-                    stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
                     
-                    # Use the generator to yield ONLY text chunks
+                    RULES:
+                    1. Use the TRANSCRIPT as your source.
+                    2. ALWAYS refer to speakers by their REAL NAMES from the Context, not "Speaker 1".
+                    3. If the answer is not in the transcript, say "That was not mentioned."
+                    """
+                    
+                    stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
                     response = st.write_stream(stream_text(stream_iterator))
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": response})
