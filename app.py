@@ -7,7 +7,8 @@ import time
 import subprocess
 import pickle
 import json
-import datetime # --- NEW IMPORT ---
+import datetime
+import pytz # --- NEW IMPORT for Timezones ---
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -53,10 +54,8 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (your-email@example.c
 # 2. API CLIENTS SETUP
 # -----------------------------------------------------
 try:
-    # Get the service account JSON from secrets
     sa_creds_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     sa_creds = service_account.Credentials.from_service_account_info(sa_creds_info)
-    
     storage_client = storage.Client(credentials=sa_creds)
     speech_client = speech.SpeechClient(credentials=sa_creds)
 except Exception as e:
@@ -77,9 +76,7 @@ def get_drive_service():
         client_config_str = st.secrets["GDRIVE_CLIENT_SECRET_JSON"]
         client_config = json.loads(client_config_str)
         refresh_token = st.secrets["GDRIVE_REFRESH_TOKEN"]
-
         creds_data = client_config["installed"] 
-
         creds = Credentials.from_authorized_user_info(
             {
                 "client_id": creds_data["client_id"],
@@ -88,14 +85,12 @@ def get_drive_service():
                 "token_uri": creds_data["token_uri"],
             }
         )
-        
         if not creds.valid:
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
                 st.error("Error with Google Drive credentials. Please re-generate refresh token.")
                 st.stop()
-
         return build("drive", "v3", credentials=creds)
     except Exception as e:
         st.error(f"FATAL ERROR: Could not load Google Drive credentials. Error: {e}")
@@ -109,7 +104,6 @@ drive_service = get_drive_service()
 def get_basecamp_session():
     token_pickle_path = "/tmp/basecamp_token.pickle"
     token = None
-    
     if os.path.exists(token_pickle_path):
         with open(token_pickle_path, "rb") as f:
             token = pickle.load(f)
@@ -122,7 +116,6 @@ def get_basecamp_session():
     st.info("Refreshing Basecamp authorization...")
     try:
         oauth = OAuth2Session(BASECAMP_CLIENT_ID)
-        
         new_token = oauth.refresh_token(
             BASECAMP_TOKEN_URL, 
             client_id=BASECAMP_CLIENT_ID,
@@ -130,15 +123,12 @@ def get_basecamp_session():
             refresh_token=YOUR_PERMANENT_REFRESH_TOKEN,
             type="refresh"
         )
-        
         with open(token_pickle_path, "wb") as f:
             pickle.dump(new_token, f)
-            
         session = OAuth2Session(BASECAMP_CLIENT_ID, token=new_token)
         session.headers.update(BASECAMP_USER_AGENT)
         st.success("Basecamp is connected.")
         return session
-        
     except Exception as e:
         st.error(f"Error refreshing Basecamp token: {e}")
         st.stop()
@@ -202,13 +192,10 @@ def get_basecamp_todolists(_session, project_id):
             return []
 
         todolists_url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todosets/{todoset_id}/todolists.json"
-        
         response = _session.get(todolists_url)
         response.raise_for_status()
         todolists = response.json()
-        
         return sorted([(tl['title'], tl['id']) for tl in todolists], key=lambda x: x[0])
-    
     except Exception as e:
         st.error(f"Error fetching Basecamp to-do lists: {e}")
         return []
@@ -219,7 +206,6 @@ def upload_bc_attachment(_session, file_bytes, file_name):
         headers = _session.headers.copy()
         headers['Content-Type'] = 'application/octet-stream'
         headers['Content-Length'] = str(len(file_bytes))
-
         upload_response = _session.post(
             f"{BASECAMP_API_BASE}/attachments.json?name={file_name}",
             data=file_bytes,
@@ -227,9 +213,7 @@ def upload_bc_attachment(_session, file_bytes, file_name):
         )
         upload_response.raise_for_status()
         response_json = upload_response.json()
-        # Correct key found via debug
         return response_json['attachable_sgid']
-    
     except KeyError:
         st.error("Basecamp Upload Error: 'attachable_sgid' key not found in response.")
         return None
@@ -242,19 +226,14 @@ def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
     try:
         content_html = title
         description_html = "" 
-        
         if attachment_sgid:
-            # Embedding attachment in the description (Notes section)
             attachment_html = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>'
             description_html = attachment_html 
-
         payload = {
             "content": content_html,
             "description": description_html,
         }
-        
         url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{todolist_id}/todos.json"
-        
         response = _session.post(url, json=payload)
         response.raise_for_status()
         return True
@@ -263,13 +242,11 @@ def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
         return False
 
 def add_formatted_text(cell, text):
-    """Applies smart formatting to Word cells."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
+        if not line: continue
         p = cell.add_paragraph()
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
@@ -283,7 +260,6 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_after = Pt(4)
         elif line.startswith('*'):
             clean_text = line.lstrip('*').lstrip("•").strip()
-            
             if clean_text.startswith('**') and ':**' in clean_text:
                 try:
                     parts = clean_text.split(':**', 1)
@@ -302,7 +278,6 @@ def add_formatted_text(cell, text):
                 p.paragraph_format.left_indent = Inches(0.25)
         else:
             p.add_run(line)
-
 
 # -----------------------------------------------------
 # 4. THE MAIN AI FUNCTION
@@ -396,7 +371,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             FORMAT:
             * Bullet point 1.
             """
-            
             response = gemini_model.generate_content(prompt)
             text = response.text
             
@@ -434,7 +408,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                 "client_reqs": client_reqs,
                 "full_transcript": full_transcript_text
             }
-    
     except Exception as e:
         if 'progress_bar' in locals(): progress_bar.empty()
         return {"error": str(e)}
@@ -484,7 +457,7 @@ with tab1:
             
             st.session_state.chat_history = [] 
             
-            # --- NEW: Auto-Parse Reps ---
+            # --- Auto-Parse Reps ---
             c_list = []
             i_list = []
             for line in participants_input.split('\n'):
@@ -516,23 +489,26 @@ with tab2:
     st.subheader("Manual Fields (For .docx Template)")
     row1_col1, row1_col2 = st.columns(2)
     
-    # --- NEW: Date/Time Pickers & Auto-Fill ---
+    # --- NEW: Date/Time Logic (Singapore Time) ---
+    sg_tz = pytz.timezone('Asia/Singapore')
+    sg_now = datetime.datetime.now(sg_tz)
+    
     with row1_col1:
-        date_obj = st.date_input("Date :red[*]", datetime.date.today())
+        date_obj = st.date_input("Date :red[*]", sg_now.date())
         venue = st.text_input("Venue")
         # Auto-filled from session state
         client_rep = st.text_area("Client Reps :red[*]", value=st.session_state.auto_client_reps, height=70)
         absent = st.text_input("Absent")
     
     with row1_col2:
-        time_obj = st.text_input("Time", datetime.datetime.now().strftime("%I:%M %p")) # Text input is cleaner for manual override if needed, but pre-filled
+        # Pre-fill with current SG Time in 12-hour format (e.g. 02:30 PM)
+        time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p")) 
         prepared_by = st.text_input("Prepared by :red[*]")
         # Auto-filled from session state
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
-    # Convert date/time objects to strings for Docx
-    date_str = date_obj.strftime("%d %B %Y") # e.g. 12 November 2024
-    time_str = time_obj # Keep text input value
+    date_str = date_obj.strftime("%d %B %Y") 
+    time_str = time_obj 
     # --- END NEW UI ---
 
     st.subheader("AI Generated Content")
@@ -603,7 +579,6 @@ with tab2:
                 t0.cell(2,1).text = time_str
                 t0.cell(3,1).text = venue
                 
-                # Append (Client) / (iFoundries) tags only if not present/empty
                 c_rep_final = f"{client_rep} (Client)" if client_rep and "(Client)" not in client_rep else client_rep
                 i_rep_final = f"{ifoundries_rep} (iFoundries)" if ifoundries_rep and "(iFoundries)" not in ifoundries_rep else ifoundries_rep
                 
