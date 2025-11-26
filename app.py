@@ -37,7 +37,6 @@ try:
     # 1. AI Robot Credentials (Shared)
     GCS_BUCKET_NAME = st.secrets["GCS_BUCKET_NAME"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-    # We parse the JSON string back into a dictionary
     GCP_SERVICE_ACCOUNT_JSON = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     
     # 2. App Identifiers (For User Login)
@@ -55,7 +54,7 @@ BASECAMP_AUTH_URL = "https://launchpad.37signals.com/authorization/new"
 BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
 BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
-BASECAMP_REDIRECT_URI = "https://www.google.com" 
+BASECAMP_REDIRECT_URI = "https://www.google.com" # Updated to match your Basecamp settings
 
 # -----------------------------------------------------
 # 2. USER LOGIN FLOW (SIDEBAR)
@@ -79,9 +78,6 @@ with st.sidebar:
             st.rerun()
     else:
         try:
-            # Identify if installed or web config
-            config_key = "installed" if "installed" in GDRIVE_CLIENT_CONFIG else "web"
-            
             flow = Flow.from_client_config(
                 GDRIVE_CLIENT_CONFIG,
                 scopes=["https://www.googleapis.com/auth/drive"],
@@ -118,8 +114,11 @@ with st.sidebar:
         
         if bc_code:
             try:
+                # --- THIS IS THE FIX ---
+                # We explicitly pass client_id again here
                 token = bc_oauth.fetch_token(
                     BASECAMP_TOKEN_URL,
+                    client_id=BASECAMP_CLIENT_ID,   # <--- ADDED THIS
                     client_secret=BASECAMP_CLIENT_SECRET,
                     code=bc_code,
                     type="web_server"
