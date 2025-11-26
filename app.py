@@ -470,7 +470,6 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        
         # --- AUTO FILL PREPARED BY FROM iFOUNDRIES REPS ---
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
         prepared_by = st.text_input("Prepared by", value=ifoundries_rep) # Defaults to iFoundries Rep
@@ -595,10 +594,8 @@ with tab3:
             st.rerun()
 
         # --- VISUAL FIX: Scrollable Container for Messages ---
-        # We set a fixed height so messages scroll properly "behind" the input box
         chat_container = st.container(height=500)
         
-        # Render history INSIDE the container
         with chat_container:
             for message in st.session_state.chat_history:
                 if message["role"] == "user":
@@ -609,32 +606,28 @@ with tab3:
                         st.markdown(message["content"])
 
         # --- Chat Input ---
-        # The input widget stays fixed at the bottom automatically by Streamlit
         if prompt := st.chat_input("Ask a question about the meeting..."):
-            
-            # 1. Add user message to state
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
-            # 2. Render new User Message immediately inside container
             with chat_container:
                 with st.chat_message("user", avatar="👤"):
                     st.markdown(prompt)
 
-            # 3. Generate Response inside container
             with chat_container:
                 with st.chat_message("assistant", avatar="🤖"):
                     def stream_text(response_iterator):
                         for chunk in response_iterator:
-                            if chunk.parts: # Only yield if there is text part
+                            if chunk.parts:
                                 yield chunk.text
 
                     try:
+                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
-                        You are a helpful, professional assistant answering questions about a specific meeting.
+                        You are an efficient, action-oriented meeting secretary who was present at this meeting.
                         
                         CONTEXT (PARTICIPANTS):
                         {participants_context}
-                        (These are the real names. Map "Speaker 1", "Speaker 2" etc. to these names based on the conversation flow.)
+                        (These are the real names. Map "Speaker X" to these real names based on the conversation flow.)
 
                         TRANSCRIPT:
                         {transcript_context}
@@ -643,10 +636,15 @@ with tab3:
                         {prompt}
                         
                         STRICT RULES:
-                        1. DO NOT use "Speaker 1", "Speaker 2", etc. You MUST replace them with the real names from the Context list.
-                        2. Deduce who is who based on the conversation (e.g., the person asking for changes is usually the Client).
-                        3. If you are unsure, say "The Client" or "The Company Rep" instead of "Speaker X".
-                        4. If the answer is not in the transcript, say "That was not mentioned."
+                        1. **Voice:** Write as if you are recording the official minutes/log. Use professional, objective language.
+                        2. **Action-First Phrasing:** Prioritize the *action* or *decision* over who said it, unless the person is critical context.
+                           - BAD: "John wants the font to be blue."
+                           - GOOD: "The font needs to be changed to blue." (Passive voice / Action focus)
+                           - GOOD: "The Client requires a change to the header image." (Role focus)
+                        3. **No Speaker IDs:** NEVER use "Speaker 1", "Speaker 2". Use real names or roles (Client/Company Rep).
+                        4. **Generalization:** Do not assume names are "John". Use the names provided in the CONTEXT list.
+                        5. If the answer is not in the transcript, say "That was not discussed."
+                        6. Be concise.
                         """
                         
                         stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
