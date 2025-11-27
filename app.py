@@ -2,8 +2,7 @@ import streamlit as st
 import os
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-# This silences the "InsecureTransportError" by allowing internal non-HTTPS routing
-# (Streamlit Cloud handles the actual HTTPS security externally)
+# This silences the "InsecureTransportError"
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 import tempfile
@@ -138,7 +137,7 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI
+# 4. SIDEBAR UI (ENFORCED WORKFLOW)
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
@@ -156,28 +155,13 @@ with st.sidebar:
             st.rerun()
     else:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
-        # Force HTTPs compliance for oauthlib
-        os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            st.markdown("""
-            <a href="{bc_auth_url}" target="_top" style="text-decoration: none;">
-                <div style="
-                    background-color: #ff4b4b;
-                    color: white;
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.5rem;
-                    text-align: center;
-                    font-weight: bold;
-                    border: 1px solid #ff4b4b;
-                    margin-bottom: 10px;
-                ">
-                    Login to Basecamp
-                </div>
-            </a>
-            """, unsafe_allow_html=True)
-            st.caption("You must log in to Basecamp first.")
+            # --- NATIVE STREAMLIT BUTTON (FIXED) ---
+            # This opens in a new tab by default, which avoids all iframe errors.
+            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
+            st.caption("Opens in a new tab. After login, this new tab will become your active App tab.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
