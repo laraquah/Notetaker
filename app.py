@@ -183,7 +183,7 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-flash-latest')
+    gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
     st.stop()
