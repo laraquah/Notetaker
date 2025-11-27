@@ -159,7 +159,7 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # Native Streamlit Link Button
+            # Use native button for reliability
             st.link_button("Login to Basecamp", bc_auth_url, type="primary")
             st.caption("Opens in a new tab. Close it after logging in.")
         else:
@@ -244,7 +244,7 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS (DOC PARSING)
 # -----------------------------------------------------
 
 def add_markdown_to_doc(doc, text):
@@ -346,16 +346,12 @@ def get_or_create_folder(service, folder_name):
             return folder.get('id')
     except Exception as e: return None
 
-# --- FIXED: Upload to Specific Folder ---
 def upload_to_drive_user(file_stream, file_name, target_folder_name):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        
-        # Find or Create the folder
         folder_id = get_or_create_folder(service, target_folder_name)
-        
-        # Fallback to root if folder creation fails
+        # If folder fails, fallback to root
         parents = [folder_id] if folder_id else []
 
         file_metadata = {"name": file_name, "parents": parents}
@@ -481,7 +477,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript_text = " ".join([result.alternatives[0].transcript for result in response.results])
 
         with st.spinner("Analyzing conversation & matching names..."):
-            # --- UPDATED PROMPT FOR SPECIFIC ACTIONS ---
             prompt = f"""
             You are an expert meeting secretary. 
             Here is the context of who was in the meeting:
@@ -501,12 +496,10 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             * **Wording & Tone:** John requested avoiding the casual use of "You are".
             * Bullet point 3.
             (Leave a blank line between sections)
-            
             ## NEXT STEPS ##
             List highly specific, actionable items. Avoid vague summaries.
             FORMAT:
             * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
-            
             ## CLIENT REQUESTS ##
             List specific questions or requests asked BY the Client.
             FORMAT:
@@ -544,6 +537,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
+    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -741,7 +735,6 @@ with tab2:
                 fname = f"Minutes_{date_str}.docx"
                 
                 if do_drive and st.session_state.gdrive_creds:
-                    # --- FIX: UPLOAD TO NAMED FOLDER ---
                     with st.spinner("Uploading to Drive ('Meeting Notes' folder)..."):
                         if upload_to_drive_user(bio, fname, "Meeting Notes"): st.success("✅ Uploaded to Drive!")
                         else: st.error("Drive upload failed.")
