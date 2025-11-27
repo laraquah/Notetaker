@@ -143,7 +143,7 @@ with st.sidebar:
         
         if AUTO_LOGIN_MODE:
             # --- FIX: Use target="_top" to break out of Streamlit iframe ---
-            st.markdown(f"""
+            st.markdown(f'''
             <a href="{bc_auth_url}" target="_top">
                 <button style="
                     background-color:#ff4b4b; 
@@ -156,7 +156,7 @@ with st.sidebar:
                     Login to Basecamp
                 </button>
             </a>
-            """, unsafe_allow_html=True)
+            ''', unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
         else:
             st.warning("Auto-login not configured in Secrets.")
