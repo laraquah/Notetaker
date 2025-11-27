@@ -1,6 +1,12 @@
 import streamlit as st
-import tempfile
 import os
+
+# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
+# This silences the "InsecureTransportError" by allowing internal non-HTTPS routing
+# (Streamlit Cloud handles the actual HTTPS security externally)
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+import tempfile
 from docx import Document
 import io
 import time
@@ -49,7 +55,7 @@ try:
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
     else:
-        BASECAMP_REDIRECT_URI = "[https://www.google.com](https://www.google.com)"
+        BASECAMP_REDIRECT_URI = "https://www.google.com"
         AUTO_LOGIN_MODE = False
 
 except Exception as e:
@@ -57,9 +63,9 @@ except Exception as e:
     st.stop()
 
 # URLs
-BASECAMP_AUTH_URL = "[https://launchpad.37signals.com/authorization/new](https://launchpad.37signals.com/authorization/new)"
-BASECAMP_TOKEN_URL = "[https://launchpad.37signals.com/authorization/token](https://launchpad.37signals.com/authorization/token)"
-BASECAMP_API_BASE = f"[https://3.basecampapi.com/](https://3.basecampapi.com/){BASECAMP_ACCOUNT_ID}"
+BASECAMP_AUTH_URL = "https://launchpad.37signals.com/authorization/new"
+BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
+BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 
 # -----------------------------------------------------
@@ -68,7 +74,7 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 def fetch_basecamp_name(token_dict):
     """Calls Basecamp Identity API to get the user's real name."""
     try:
-        identity_url = "[https://launchpad.37signals.com/authorization.json](https://launchpad.37signals.com/authorization.json)"
+        identity_url = "https://launchpad.37signals.com/authorization.json"
         headers = {
             "Authorization": f"Bearer {token_dict['access_token']}",
             "User-Agent": "AI Meeting Notes App"
@@ -93,7 +99,17 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# Check for Basecamp Return Code
+# --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
+if 'gdrive_creds_json' in st.session_state and st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
+    try:
+        creds = Credentials.from_authorized_user_info(
+            json.loads(st.session_state.gdrive_creds_json)
+        )
+        st.session_state.gdrive_creds = creds
+    except Exception as e:
+        st.session_state.gdrive_creds_json = None
+
+# --- AUTO-LOGIN HANDLER (BASECAMP) ---
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -122,12 +138,12 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI (ENFORCED WORKFLOW)
+# 4. SIDEBAR UI
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
     
-    # --- STEP 1: BASECAMP (Must happen first) ---
+    # --- STEP 1: BASECAMP ---
     st.markdown("### Step 1: Basecamp")
     
     if st.session_state.basecamp_token:
@@ -136,29 +152,29 @@ with st.sidebar:
             st.session_state.basecamp_token = None
             st.session_state.user_real_name = ""
             st.session_state.gdrive_creds = None
+            st.session_state.gdrive_creds_json = None
             st.rerun()
     else:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
+        # Force HTTPs compliance for oauthlib
+        os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- FIXED HTML BUTTON ---
-            # This is an <a> tag styled to look like a button. 
-            # target="_top" forces it to break out of the Streamlit iframe.
             st.markdown(f"""
-            <a href="{bc_auth_url}" target="_top" style="
-                display: inline-block;
-                background-color: #ff4b4b;
-                color: white;
-                padding: 0.5rem 1rem;
-                border-radius: 0.5rem;
-                text-decoration: none;
-                font-weight: bold;
-                text-align: center;
-                border: 1px solid #ff4b4b;
-                width: 100%;
-            ">
-                Login to Basecamp
+            <a href="{bc_auth_url}" target="_top" style="text-decoration: none;">
+                <div style="
+                    background-color: #ff4b4b;
+                    color: white;
+                    padding: 0.5rem 1rem;
+                    border-radius: 0.5rem;
+                    text-align: center;
+                    font-weight: bold;
+                    border: 1px solid #ff4b4b;
+                    margin-bottom: 10px;
+                ">
+                    Login to Basecamp
+                </div>
             </a>
             """, unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
@@ -197,12 +213,13 @@ with st.sidebar:
             st.success("✅ Connected")
             if st.button("Logout Drive"):
                 st.session_state.gdrive_creds = None
+                st.session_state.gdrive_creds_json = None
                 st.rerun()
         else:
             try:
                 flow = Flow.from_client_config(
                     GDRIVE_CLIENT_CONFIG,
-                    scopes=["[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"],
+                    scopes=["https://www.googleapis.com/auth/drive"],
                     redirect_uri="urn:ietf:wg:oauth:2.0:oob"
                 )
                 auth_url, _ = flow.authorization_url(prompt='consent')
@@ -213,6 +230,7 @@ with st.sidebar:
                 if g_code:
                     flow.fetch_token(code=g_code)
                     st.session_state.gdrive_creds = flow.credentials
+                    st.session_state.gdrive_creds_json = flow.credentials.to_json()
                     st.rerun()
             except Exception as e:
                 st.error(f"Config Error: {e}")
