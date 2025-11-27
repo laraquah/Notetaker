@@ -83,29 +83,15 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. SESSION STATE & AUTO-LOGIN
+# 3. AUTO-LOGIN HANDLER
 # -----------------------------------------------------
-
-# --- FIX: Use JSON string for Drive Creds persistence ---
-if 'gdrive_creds_json' not in st.session_state:
-    st.session_state.gdrive_creds_json = None
-
-# Rehydrate Google Creds object from JSON string if it exists
-gdrive_creds_object = None
-if st.session_state.gdrive_creds_json:
-    try:
-        gdrive_creds_object = Credentials.from_authorized_user_info(
-            json.loads(st.session_state.gdrive_creds_json)
-        )
-    except:
-        st.session_state.gdrive_creds_json = None # Reset if corrupt
-
+if 'gdrive_creds' not in st.session_state:
+    st.session_state.gdrive_creds = None
 if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# --- BASECAMP AUTO-LOGIN HANDLER ---
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -119,13 +105,10 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         response = requests.post(BASECAMP_TOKEN_URL, data=payload)
         response.raise_for_status()
         token = response.json()
-        
         st.session_state.basecamp_token = token
-        
         real_name = fetch_basecamp_name(token)
         if real_name:
             st.session_state.user_real_name = real_name
-            
         st.query_params.clear()
         st.toast("✅ Basecamp Login Successful!", icon="🎉")
         time.sleep(1)
@@ -142,10 +125,10 @@ with st.sidebar:
 
     # --- GOOGLE DRIVE LOGIN ---
     st.subheader("1. Google Drive")
-    if gdrive_creds_object:
+    if st.session_state.gdrive_creds:
         st.success("✅ Connected to Drive")
         if st.button("Logout Drive"):
-            st.session_state.gdrive_creds_json = None
+            st.session_state.gdrive_creds = None
             st.rerun()
     else:
         try:
@@ -155,14 +138,11 @@ with st.sidebar:
                 redirect_uri="urn:ietf:wg:oauth:2.0:oob"
             )
             auth_url, _ = flow.authorization_url(prompt='consent')
-            
             st.markdown(f"👉 [**Authorize Google Drive**]({auth_url})")
             g_code = st.text_input("Paste Google Code:", key="g_code")
-            
             if g_code:
                 flow.fetch_token(code=g_code)
-                # --- FIX: Save as JSON string so it survives page reloads ---
-                st.session_state.gdrive_creds_json = flow.credentials.to_json()
+                st.session_state.gdrive_creds = flow.credentials
                 st.rerun()
         except Exception as e:
             st.error(f"Config Error: {e}")
@@ -175,7 +155,6 @@ with st.sidebar:
         st.success(f"✅ Connected")
         if st.session_state.user_real_name:
             st.caption(f"👤 Logged in as: **{st.session_state.user_real_name}**")
-            
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
             st.session_state.user_real_name = ""
@@ -186,12 +165,10 @@ with st.sidebar:
         
         if AUTO_LOGIN_MODE:
             st.link_button("Login with Basecamp", bc_auth_url, type="primary")
-            st.caption("Redirects to Basecamp and back.")
         else:
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
             st.caption("Copy the code from the Google URL bar.")
             bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
-            
             if bc_code:
                 try:
                     payload = {
@@ -203,12 +180,9 @@ with st.sidebar:
                     }
                     response = requests.post(BASECAMP_TOKEN_URL, data=payload)
                     response.raise_for_status()
-                    token = response.json()
-                    
-                    st.session_state.basecamp_token = token
-                    real_name = fetch_basecamp_name(token)
-                    if real_name:
-                        st.session_state.user_real_name = real_name
+                    st.session_state.basecamp_token = response.json()
+                    real_name = fetch_basecamp_name(st.session_state.basecamp_token)
+                    if real_name: st.session_state.user_real_name = real_name
                     st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
@@ -222,6 +196,7 @@ try:
     speech_client = speech.SpeechClient(credentials=sa_creds)
     
     genai.configure(api_key=GOOGLE_API_KEY)
+    # Locked model
     gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
 except Exception as e:
     st.error(f"System Error (AI Services): {e}")
@@ -230,7 +205,6 @@ except Exception as e:
 # -----------------------------------------------------
 # 6. HELPER FUNCTIONS
 # -----------------------------------------------------
-
 def get_basecamp_session_user():
     if not st.session_state.basecamp_token: return None
     session = OAuth2Session(BASECAMP_CLIENT_ID, token=st.session_state.basecamp_token)
@@ -248,10 +222,9 @@ def upload_to_gcs(file_path, destination_blob_name):
         return None
 
 def upload_to_drive_user(file_stream, file_name):
-    # Use the global object we hydrated at the start
-    if not gdrive_creds_object: return None
+    if not st.session_state.gdrive_creds: return None
     try:
-        service = build("drive", "v3", credentials=gdrive_creds_object)
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
         file_metadata = {"name": file_name} 
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -475,7 +448,7 @@ if "auto_ifoundries_reps" not in st.session_state:
 if "saved_participants_input" not in st.session_state:
     st.session_state.saved_participants_input = ""
 
-st.title("🤖 AI Meeting Manager")
+st.title("🤖 AI Meeting Manager v2.0") # Added version to title
 
 tab1, tab2, tab3 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat"])
 
@@ -497,7 +470,6 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # Auto-fill logic
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
@@ -525,10 +497,7 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        
-        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
-        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -573,7 +542,7 @@ with tab2:
         else:
             st.warning("⚠️ Please log in to Basecamp in the sidebar first.")
 
-    if do_drive and not st.session_state.gdrive_creds_json:
+    if do_drive and not st.session_state.gdrive_creds:
         st.warning("⚠️ Please log in to Google Drive in the sidebar first.")
 
     if st.button("Generate Word Doc"):
@@ -589,7 +558,7 @@ with tab2:
         if not date_str or not prepared_by or not client_rep:
             st.error("Missing required fields (*)")
         elif not do_basecamp or basecamp_ready:
-            if do_drive and not gdrive_creds_object:
+            if do_drive and not st.session_state.gdrive_creds:
                 st.error("Google Drive not connected.")
             else:
                 try:
@@ -614,7 +583,7 @@ with tab2:
                     bio.seek(0)
                     fname = f"Minutes_{date_str}.docx"
                     
-                    if do_drive and gdrive_creds_object:
+                    if do_drive and st.session_state.gdrive_creds:
                         with st.spinner("Uploading to Drive..."):
                             if upload_to_drive_user(bio, fname): st.success("Uploaded to Drive!")
                             else: st.error("Drive upload failed.")
@@ -651,61 +620,60 @@ with tab3:
             st.session_state.chat_history = []
             st.rerun()
 
-        chat_container = st.container(height=500)
-        
-        with chat_container:
-            for message in st.session_state.chat_history:
-                if message["role"] == "user":
-                    with st.chat_message("user", avatar="👤"):
-                        st.markdown(message["content"])
-                else:
-                    with st.chat_message("assistant", avatar="🤖"):
-                        st.markdown(message["content"])
+        # Display chat messages using standard flow
+        for message in st.session_state.chat_history:
+            if message["role"] == "user":
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(message["content"])
+            else:
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.markdown(message["content"])
 
         if prompt := st.chat_input("Ask a question about the meeting..."):
+            # Add user message to state
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
-            with chat_container:
-                with st.chat_message("user", avatar="👤"):
-                    st.markdown(prompt)
+            # Rerun to update the display immediately (Puts user msg above input)
+            st.rerun() 
 
-            with chat_container:
-                with st.chat_message("assistant", avatar="🤖"):
-                    def stream_text(response_iterator):
-                        for chunk in response_iterator:
-                            if chunk.parts:
-                                yield chunk.text
+    # Logic to process the last message if it was from user (Handling the response)
+    if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+        with st.chat_message("assistant", avatar="🤖"):
+            def stream_text(response_iterator):
+                for chunk in response_iterator:
+                    if chunk.parts:
+                        yield chunk.text
 
-                    try:
-                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
-                        full_prompt = f"""
-                        You are an efficient, action-oriented meeting secretary who was present at this meeting.
-                        
-                        CONTEXT (PARTICIPANTS):
-                        {participants_context}
-                        (These are the real names. Map "Speaker X" to these real names based on the conversation flow.)
+            try:
+                prompt = st.session_state.chat_history[-1]["content"]
+                
+                # --- STRICT SECRETARY PROMPT ---
+                full_prompt = f"""
+                You are an efficient, action-oriented meeting secretary.
+                
+                CONTEXT (PARTICIPANTS):
+                {participants_context}
+                (Use this to map "Speaker X" to real names.)
 
-                        TRANSCRIPT:
-                        {transcript_context}
-                        
-                        USER QUESTION:
-                        {prompt}
-                        
-                        STRICT RULES:
-                        1. **Voice:** Write as if you are recording the official minutes/log. Use professional, objective language.
-                        2. **Action-First Phrasing:** Prioritize the *action* or *decision* over who said it, unless the person is critical context.
-                           - BAD: "John wants the font to be blue."
-                           - GOOD: "The font needs to be changed to blue." (Passive voice / Action focus)
-                           - GOOD: "The Client requires a change to the header image." (Role focus)
-                        3. **No Speaker IDs:** NEVER use "Speaker 1", "Speaker 2". Use real names or roles (Client/Company Rep).
-                        4. **Generalization:** Do not assume names are "John". Use the names provided in the CONTEXT list.
-                        5. If the answer is not in the transcript, say "That was not discussed."
-                        6. Be concise.
-                        """
-                        
-                        stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
-                        response = st.write_stream(stream_text(stream_iterator))
-                        
-                        st.session_state.chat_history.append({"role": "assistant", "content": response})
-                    except Exception as e:
-                        st.error("I couldn't generate a response. Please try again.")
+                TRANSCRIPT:
+                {transcript_context}
+                
+                USER QUESTION:
+                {prompt}
+                
+                RULES:
+                1. **FORBIDDEN:** Do NOT use "Speaker 1", "Speaker 2", etc.
+                2. **Identify:** Deduce who is who based on the conversation (e.g., person asking for work is usually the Client).
+                3. **Voice:** Use professional, passive voice or role-based language.
+                   - "Changes to the header were requested."
+                   - "The Client asked for..."
+                4. If you don't know who someone is, say "A participant".
+                5. Be concise.
+                """
+                
+                stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
+                response = st.write_stream(stream_text(stream_iterator))
+                
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
+            except Exception as e:
+                st.error("I couldn't generate a response. Please try again.")
