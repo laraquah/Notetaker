@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components # --- REQUIRED FOR REDIRECT ---
 import tempfile
 import os
 from docx import Document
@@ -154,11 +153,26 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- JS REDIRECT FIX ---
-            # This button triggers a rerun, which injects JS to force navigation
-            if st.button("Login to Basecamp", type="primary"):
-                js = f"<script>window.top.location.href = '{bc_auth_url}';</script>"
-                components.html(js, height=0)
+            # --- FIXED HTML BUTTON: BREAKS OUT OF IFRAME ---
+            # target="_top" is the key to fixing "refused to connect"
+            st.markdown(f"""
+            <a href="{bc_auth_url}" target="_top" style="text-decoration:none;">
+                <div style="
+                    background-color: #ff4b4b;
+                    color: white;
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    text-align: center;
+                    font-weight: bold;
+                    cursor: pointer;
+                    display: block;
+                    width: 100%;
+                    box-sizing: border-box;
+                ">
+                    Login to Basecamp
+                </div>
+            </a>
+            """, unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
         else:
             st.warning("Auto-login not configured in Secrets.")
@@ -643,6 +657,7 @@ with tab3:
             st.session_state.chat_history = []
             st.rerun()
 
+        # --- VISUAL FIX: Scrollable Container for Messages ---
         chat_container = st.container(height=500)
         
         with chat_container:
