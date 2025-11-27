@@ -143,7 +143,7 @@ with st.sidebar:
         
         if AUTO_LOGIN_MODE:
             # --- FIXED HTML BLOCK ---
-            st.markdown(f"""
+            st.markdown(f'''
             <a href="{bc_auth_url}" target="_self">
                 <button style="
                     background-color:#ff4b4b; 
@@ -156,7 +156,7 @@ with st.sidebar:
                     Login to Basecamp
                 </button>
             </a>
-            """, unsafe_allow_html=True)
+            ''', unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
         else:
             st.warning("Auto-login not configured in Secrets.")
