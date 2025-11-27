@@ -42,9 +42,8 @@ try:
     BASECAMP_CLIENT_SECRET = st.secrets["BASECAMP_CLIENT_SECRET"]
     BASECAMP_ACCOUNT_ID = st.secrets["BASECAMP_ACCOUNT_ID"]
     
-    # --- AUTO-LOGIN LOGIC ---
+    # Auto-Login Logic
     STREAMLIT_APP_URL = st.secrets.get("STREAMLIT_APP_URL", None)
-    
     if STREAMLIT_APP_URL:
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
@@ -63,9 +62,37 @@ BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 
 # -----------------------------------------------------
-# 2. HELPER: GET USER IDENTITY
+# 2. CRITICAL: RESTORE SESSIONS ON RELOAD
+# -----------------------------------------------------
+
+# Initialize state variables
+if 'gdrive_creds_json' not in st.session_state:
+    st.session_state.gdrive_creds_json = None
+if 'gdrive_creds' not in st.session_state:
+    st.session_state.gdrive_creds = None
+if 'basecamp_token' not in st.session_state:
+    st.session_state.basecamp_token = None
+if 'user_real_name' not in st.session_state:
+    st.session_state.user_real_name = ""
+
+# --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
+# If we have the JSON string but not the object (which happens after a redirect), restore it now.
+if st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
+    try:
+        creds = Credentials.from_authorized_user_info(
+            json.loads(st.session_state.gdrive_creds_json)
+        )
+        st.session_state.gdrive_creds = creds
+        # No rerun needed here, just restore the object for the rest of the script
+    except Exception as e:
+        st.error("Failed to restore Google session. Please login again.")
+        st.session_state.gdrive_creds_json = None
+
+# -----------------------------------------------------
+# 3. HELPER: GET USER IDENTITY
 # -----------------------------------------------------
 def fetch_basecamp_name(token_dict):
+    """Calls Basecamp Identity API to get the user's real name."""
     try:
         identity_url = "https://launchpad.37signals.com/authorization.json"
         headers = {
@@ -83,29 +110,8 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. SESSION STATE & AUTO-LOGIN
+# 4. AUTO-LOGIN HANDLER (BASECAMP)
 # -----------------------------------------------------
-
-# --- FIX: Use JSON string for Drive Creds persistence ---
-if 'gdrive_creds_json' not in st.session_state:
-    st.session_state.gdrive_creds_json = None
-
-# Rehydrate Google Creds object from JSON string if it exists
-gdrive_creds_object = None
-if st.session_state.gdrive_creds_json:
-    try:
-        gdrive_creds_object = Credentials.from_authorized_user_info(
-            json.loads(st.session_state.gdrive_creds_json)
-        )
-    except:
-        st.session_state.gdrive_creds_json = None # Reset if corrupt
-
-if 'basecamp_token' not in st.session_state:
-    st.session_state.basecamp_token = None
-if 'user_real_name' not in st.session_state:
-    st.session_state.user_real_name = ""
-
-# --- BASECAMP AUTO-LOGIN HANDLER ---
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -134,7 +140,7 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI
+# 5. SIDEBAR UI
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
@@ -142,9 +148,10 @@ with st.sidebar:
 
     # --- GOOGLE DRIVE LOGIN ---
     st.subheader("1. Google Drive")
-    if gdrive_creds_object:
+    if st.session_state.gdrive_creds:
         st.success("✅ Connected to Drive")
         if st.button("Logout Drive"):
+            st.session_state.gdrive_creds = None
             st.session_state.gdrive_creds_json = None
             st.rerun()
     else:
@@ -161,7 +168,8 @@ with st.sidebar:
             
             if g_code:
                 flow.fetch_token(code=g_code)
-                # --- FIX: Save as JSON string so it survives page reloads ---
+                # Save BOTH the object (for now) and the JSON (for after reload)
+                st.session_state.gdrive_creds = flow.credentials
                 st.session_state.gdrive_creds_json = flow.credentials.to_json()
                 st.rerun()
         except Exception as e:
@@ -189,9 +197,7 @@ with st.sidebar:
             st.caption("Redirects to Basecamp and back.")
         else:
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
-            st.caption("Copy the code from the Google URL bar.")
             bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
-            
             if bc_code:
                 try:
                     payload = {
@@ -203,18 +209,15 @@ with st.sidebar:
                     }
                     response = requests.post(BASECAMP_TOKEN_URL, data=payload)
                     response.raise_for_status()
-                    token = response.json()
-                    
-                    st.session_state.basecamp_token = token
-                    real_name = fetch_basecamp_name(token)
-                    if real_name:
-                        st.session_state.user_real_name = real_name
+                    st.session_state.basecamp_token = response.json()
+                    real_name = fetch_basecamp_name(st.session_state.basecamp_token)
+                    if real_name: st.session_state.user_real_name = real_name
                     st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
 
 # -----------------------------------------------------
-# 5. API CLIENTS (ROBOT) SETUP
+# 6. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
@@ -228,7 +231,7 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 7. HELPER FUNCTIONS
 # -----------------------------------------------------
 
 def get_basecamp_session_user():
@@ -248,10 +251,9 @@ def upload_to_gcs(file_path, destination_blob_name):
         return None
 
 def upload_to_drive_user(file_stream, file_name):
-    # Use the global object we hydrated at the start
-    if not gdrive_creds_object: return None
+    if not st.session_state.gdrive_creds: return None
     try:
-        service = build("drive", "v3", credentials=gdrive_creds_object)
+        service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
         file_metadata = {"name": file_name} 
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -573,7 +575,7 @@ with tab2:
         else:
             st.warning("⚠️ Please log in to Basecamp in the sidebar first.")
 
-    if do_drive and not st.session_state.gdrive_creds_json:
+    if do_drive and not st.session_state.gdrive_creds:
         st.warning("⚠️ Please log in to Google Drive in the sidebar first.")
 
     if st.button("Generate Word Doc"):
@@ -589,7 +591,7 @@ with tab2:
         if not date_str or not prepared_by or not client_rep:
             st.error("Missing required fields (*)")
         elif not do_basecamp or basecamp_ready:
-            if do_drive and not gdrive_creds_object:
+            if do_drive and not st.session_state.gdrive_creds:
                 st.error("Google Drive not connected.")
             else:
                 try:
@@ -614,7 +616,7 @@ with tab2:
                     bio.seek(0)
                     fname = f"Minutes_{date_str}.docx"
                     
-                    if do_drive and gdrive_creds_object:
+                    if do_drive and st.session_state.gdrive_creds:
                         with st.spinner("Uploading to Drive..."):
                             if upload_to_drive_user(bio, fname): st.success("Uploaded to Drive!")
                             else: st.error("Drive upload failed.")
