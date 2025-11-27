@@ -161,7 +161,7 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            st.markdown(f"""
+            st.markdown("""
             <a href="{bc_auth_url}" target="_top" style="text-decoration: none;">
                 <div style="
                     background-color: #ff4b4b;
