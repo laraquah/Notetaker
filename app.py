@@ -1,8 +1,8 @@
 import streamlit as st
+import streamlit.components.v1 as components # --- NEW IMPORT for JS Redirect ---
 import os
 
 # --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-# This silences the "InsecureTransportError"
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 import tempfile
@@ -158,10 +158,14 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- NATIVE STREAMLIT BUTTON (FIXED) ---
-            # This opens in a new tab by default, which avoids all iframe errors.
-            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
-            st.caption("Opens in a new tab. After login, this new tab will become your active App tab.")
+            # --- RELIABLE JS REDIRECT ---
+            if st.button("Login to Basecamp", type="primary"):
+                # This injects a script to force the browser to navigate in the SAME tab
+                # It breaks out of Streamlit's iframe sandbox effectively
+                js = f"<script>window.top.location.href = '{bc_auth_url}';</script>"
+                components.html(js, height=0)
+                
+            st.caption("Redirects to Basecamp in this tab.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -519,10 +523,7 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        
-        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
-        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -671,7 +672,6 @@ with tab3:
                                 yield chunk.text
 
                     try:
-                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
                         You are an efficient, action-oriented meeting secretary.
                         
