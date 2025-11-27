@@ -30,7 +30,7 @@ from google.oauth2 import service_account
 # --- Import Basecamp & formatting tools ---
 import requests
 from requests_oauthlib import OAuth2Session
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, RGBColor
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
@@ -158,11 +158,9 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # --- RELIABLE JS REDIRECT ---
-            if st.button("Login to Basecamp", type="primary"):
-                js = f"<script>window.top.location.href = '{bc_auth_url}';</script>"
-                components.html(js, height=0)
-            st.caption("Redirects to Basecamp in this tab.")
+            # Native Button for reliability
+            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
+            st.caption("Opens in a new tab. Close it after logging in.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -209,7 +207,7 @@ with st.sidebar:
                 )
                 auth_url, _ = flow.authorization_url(prompt='consent')
                 
-                st.markdown(f"👉 [**Click to Authorize Drive**]({auth_url})")
+                st.link_button("Login to Google Drive", auth_url)
                 g_code = st.text_input("Paste Google Code:", key="g_code")
                 
                 if g_code:
@@ -221,19 +219,8 @@ with st.sidebar:
                 st.error(f"Config Error: {e}")
 
 # -----------------------------------------------------
-# 5. SECURITY CHECK: IS USER FULLY LOGGED IN?
+# 5. API CLIENTS (ROBOT) SETUP
 # -----------------------------------------------------
-# Only proceed if BOTH Basecamp and Google Drive are connected
-if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
-    st.title("🔒 Access Restricted")
-    st.warning("Please log in to **Basecamp** and **Google Drive** in the sidebar to unlock the AI Meeting Manager.")
-    st.stop() # Halts the script here. The rest of the UI will NOT load.
-
-# =====================================================
-#     MAIN APP LOGIC (Only runs if unlocked)
-# =====================================================
-
-# --- API CLIENTS (ROBOT) SETUP ---
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
     storage_client = storage.Client(credentials=sa_creds)
@@ -246,7 +233,7 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS (ADVANCED)
 # -----------------------------------------------------
 
 def get_basecamp_session_user():
@@ -265,11 +252,42 @@ def upload_to_gcs(file_path, destination_blob_name):
         st.error(f"GCS Upload Error: {e}")
         return None
 
-def upload_to_drive_user(file_stream, file_name):
+# --- NEW: SMART FOLDER MANAGEMENT ---
+def get_or_create_folder(service, folder_name):
+    """Finds a folder by name in root, or creates it."""
+    try:
+        # Search for the folder
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        items = results.get('files', [])
+        
+        if items:
+            return items[0]['id'] # Found it
+        else:
+            # Create it
+            file_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            folder = service.files().create(body=file_metadata, fields='id').execute()
+            return folder.get('id')
+    except Exception as e:
+        st.error(f"Drive Folder Error: {e}")
+        return None
+
+def upload_to_drive_user(file_stream, file_name, target_folder_name):
+    """Uploads file to a specific named folder (creating it if needed)."""
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        file_metadata = {"name": file_name} 
+        
+        # Get the ID of the target folder (e.g. "Meeting Notes")
+        folder_id = get_or_create_folder(service, target_folder_name)
+        
+        if not folder_id:
+            return None # Failed to get folder
+
+        file_metadata = {"name": file_name, "parents": [folder_id]}
         media = MediaIoBaseUpload(
             file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
@@ -281,21 +299,33 @@ def upload_to_drive_user(file_stream, file_name):
         st.error(f"Google Drive Upload Error: {e}")
         return None
 
+# --- BASECAMP HELPERS ---
 def get_basecamp_projects(_session):
     try:
         response = _session.get(f"{BASECAMP_API_BASE}/projects.json")
         response.raise_for_status()
-        return sorted([(p['name'], p['id']) for p in response.json() if p['status'] == 'active'], key=lambda x: x[0])
+        return sorted([(p['name'], p['id'], p.get('dock', [])) for p in response.json() if p['status'] == 'active'], key=lambda x: x[0])
     except: return []
 
-def get_basecamp_todolists(_session, project_id):
+def get_project_tools(_session, project_id):
+    """Fetches the available tools (dock) for a project."""
     try:
-        project_resp = _session.get(f"{BASECAMP_API_BASE}/projects/{project_id}.json").json()
-        todoset_id = next((t['id'] for t in project_resp.get('dock', []) if t['name'] == 'todoset' and t['enabled']), None)
-        if not todoset_id: return []
-        lists = _session.get(f"{BASECAMP_API_BASE}/buckets/{project_id}/todosets/{todoset_id}/todolists.json").json()
-        return sorted([(tl['title'], tl['id']) for tl in lists], key=lambda x: x[0])
+        response = _session.get(f"{BASECAMP_API_BASE}/projects/{project_id}.json")
+        response.raise_for_status()
+        return response.json().get('dock', [])
     except: return []
+
+def get_todolists(_session, todoset_id, project_id):
+    try:
+        url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todosets/{todoset_id}/todolists.json"
+        resp = _session.get(url)
+        return sorted([(t['title'], t['id']) for t in resp.json()], key=lambda x: x[0])
+    except: return []
+
+def get_message_boards(_session, message_board_id, project_id):
+    # Basecamp doesn't list "boards", the Message Board IS the board.
+    # We just return the ID to confirm it exists.
+    return [{"id": message_board_id, "title": "Message Board"}]
 
 def upload_bc_attachment(_session, file_bytes, file_name):
     try:
@@ -307,21 +337,43 @@ def upload_bc_attachment(_session, file_bytes, file_name):
         st.error(f"Basecamp Upload Error: {e}")
         return None
 
-def create_bc_todo(_session, project_id, todolist_id, title, attachment_sgid):
+def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, content, attachment_sgid):
+    """Universal poster for To-dos, Messages, and Docs."""
     try:
-        content = title
-        desc = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>' if attachment_sgid else ""
-        payload = {"content": content, "description": desc}
-        url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{todolist_id}/todos.json"
-        _session.post(url, json=payload).raise_for_status()
+        # Prepare attachment HTML
+        attach_html = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>' if attachment_sgid else ""
+        
+        if tool_type == "To-dos":
+            # sub_id is the Todo List ID
+            url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{sub_id}/todos.json"
+            payload = {"content": title, "description": content + attach_html}
+            
+        elif tool_type == "Message Board":
+            # tool_id is the Message Board ID
+            url = f"{BASECAMP_API_BASE}/buckets/{project_id}/message_boards/{tool_id}/messages.json"
+            payload = {"subject": title, "content": content + attach_html, "status": "active"}
+            
+        elif tool_type == "Docs & Files":
+            # tool_id is the Vault ID
+            # For Docs & Files, we create an 'Upload' resource
+            url = f"{BASECAMP_API_BASE}/buckets/{project_id}/vaults/{tool_id}/uploads.json"
+            # Note: Docs/Files are weird, they mainly just take the attachment
+            payload = {
+                "attachable_sgid": attachment_sgid,
+                "base_name": title,
+                "content": content
+            }
+
+        resp = _session.post(url, json=payload)
+        resp.raise_for_status()
         return True
     except Exception as e:
-        st.error(f"Basecamp Create Error: {e}")
+        st.error(f"Basecamp Post Error: {e}")
         return False
 
+# --- AI & CHAT HELPERS ---
 def get_structured_notes_google(audio_file_path, file_name, participants_context):
-    flac_file_path = ""
-    flac_blob_name = ""
+    # (Standard Turbo Mode function)
     try:
         with st.spinner(f"Converting {file_name} to audio-only FLAC..."):
             base_name = os.path.splitext(audio_file_path)[0]
@@ -503,7 +555,6 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # Auto-fill logic
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
@@ -525,16 +576,13 @@ with tab2:
     
     row1, row2 = st.columns(2)
     with row1:
-        date_obj = st.date_input("Date", sg_now.date())
+        date_obj = st.date_input("Date", sg_now.date(), key="meeting_date")
         venue = st.text_input("Venue")
         client_rep = st.text_area("Client Reps", value=st.session_state.auto_client_reps)
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
-        
-        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
-        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -546,12 +594,18 @@ with tab2:
     with st.expander("View Specific Client Requests"):
         st.text_area("Client Requests", value=st.session_state.ai_results.get("client_reqs", ""), height=150)
 
+    st.divider()
     st.header("3. Generate & Upload")
     
     bc_session_user = None
+    
+    # --- UPDATED BASECAMP SELECTION LOGIC ---
     bc_project_id = None
-    bc_todolist_id = None
-    bc_todo_title = ""
+    bc_tool_type = None # To-dos, Message Board, Docs
+    bc_tool_id = None # The ID of the tool (todoset ID, message_board ID, vault ID)
+    bc_sub_id = None # Specific ID (e.g. Todo List ID)
+    bc_title = ""
+    bc_content = ""
 
     do_drive = st.checkbox("Upload to Drive")
     do_basecamp = st.checkbox("Upload to Basecamp") 
@@ -560,21 +614,54 @@ with tab2:
         if st.session_state.basecamp_token:
             bc_session_user = get_basecamp_session_user()
             try:
+                # 1. Select Project
                 projects_list = get_basecamp_projects(bc_session_user)
                 if not projects_list:
                     st.warning("No active Basecamp projects found.")
                 else:
                     selected_project_name = st.selectbox("Select Project", options=[p[0] for p in projects_list], index=None, placeholder="Choose...")
+                    
                     if selected_project_name:
+                        # Find project ID
                         bc_project_id = next(p[1] for p in projects_list if p[0] == selected_project_name)
-                        todolists = get_basecamp_todolists(bc_session_user, bc_project_id)
-                        if not todolists: st.warning("No to-do lists found.")
-                        else:
-                            selected_list = st.selectbox("Select List", options=[tl[0] for tl in todolists], index=None, placeholder="Choose...")
-                            if selected_list:
-                                bc_todolist_id = next(tl[1] for tl in todolists if tl[0] == selected_list)
-                                bc_todo_title = st.text_input("To-Do Title :red[*]")
-                                if date_str: st.info(f"📎 Minutes_{date_str}.docx will be attached to Notes.")
+                        
+                        # 2. Select Tool Type
+                        bc_tool_type = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs & Files"], index=0)
+                        
+                        # Get Tools (Dock)
+                        project_tools = get_project_tools(bc_session_user, bc_project_id)
+                        
+                        if bc_tool_type == "To-dos":
+                            # Find Todoset ID
+                            todoset = next((t for t in project_tools if t['name'] == 'todoset'), None)
+                            if todoset:
+                                bc_tool_id = todoset['id'] # We don't really use this directly for posting, but good to have
+                                # Get Todo Lists
+                                todolists = get_todolists(bc_session_user, todoset['id'], bc_project_id)
+                                if todolists:
+                                    selected_list = st.selectbox("Select Todo List", options=[tl[0] for tl in todolists])
+                                    if selected_list:
+                                        bc_sub_id = next(tl[1] for tl in todolists if tl[0] == selected_list)
+                                        bc_title = st.text_input("To-Do Title", value=f"Meeting Minutes - {date_str}")
+                                        bc_content = st.text_area("Description", value="Attached are the minutes from the meeting.")
+                                else: st.warning("No To-do lists found.")
+                        
+                        elif bc_tool_type == "Message Board":
+                            # Find Message Board ID
+                            mb = next((t for t in project_tools if t['name'] == 'message_board'), None)
+                            if mb:
+                                bc_tool_id = mb['id']
+                                bc_title = st.text_input("Subject", value=f"Meeting Minutes - {date_str}")
+                                bc_content = st.text_area("Message Body", value="Hi team,\n\nHere are the minutes from today's meeting.")
+                        
+                        elif bc_tool_type == "Docs & Files":
+                            # Find Vault ID
+                            vault = next((t for t in project_tools if t['name'] == 'vault'), None)
+                            if vault:
+                                bc_tool_id = vault['id']
+                                bc_title = st.text_input("File Name (Basecamp)", value=f"Minutes_{date_str}")
+                                bc_content = st.text_area("Description (Optional)", value="")
+                                
             except Exception as e: st.error(f"Basecamp Error: {e}")
         else:
             st.warning("⚠️ Please log in to Basecamp in the sidebar first.")
@@ -588,8 +675,12 @@ with tab2:
             if not st.session_state.basecamp_token:
                 st.error("Basecamp not connected.")
                 basecamp_ready = False
-            elif not bc_project_id or not bc_todolist_id or not bc_todo_title:
-                st.error("Please complete Basecamp fields.")
+            # Check required fields based on tool type
+            elif not bc_project_id:
+                st.error("Please select a project.")
+                basecamp_ready = False
+            elif bc_tool_type == "To-dos" and not bc_sub_id:
+                st.error("Please select a To-do List.")
                 basecamp_ready = False
 
         if not date_str or not prepared_by or not client_rep:
@@ -620,22 +711,26 @@ with tab2:
                     bio.seek(0)
                     fname = f"Minutes_{date_str}.docx"
                     
+                    # --- NEW: SMART DRIVE UPLOAD ---
                     if do_drive and st.session_state.gdrive_creds:
-                        with st.spinner("Uploading to Drive..."):
-                            if upload_to_drive_user(bio, fname): st.success("Uploaded to Drive!")
-                            else: st.error("Drive upload failed.")
+                        with st.spinner("Uploading to Drive ('Meeting Notes' folder)..."):
+                            if upload_to_drive_user(bio, fname, "Meeting Notes"): 
+                                st.success("✅ Uploaded to 'Meeting Notes' in Drive!")
+                            else: 
+                                st.error("Drive upload failed.")
                         bio.seek(0)
 
+                    # --- NEW: ADVANCED BASECAMP POSTING ---
                     if do_basecamp and basecamp_ready and bc_session_user:
-                        with st.spinner(f"Uploading to Basecamp..."):
+                        with st.spinner(f"Posting to Basecamp ({bc_tool_type})..."):
                             file_bytes = bio.getvalue()
                             sgid = upload_bc_attachment(bc_session_user, file_bytes, fname)
                         
                         if sgid:
-                            with st.spinner("Creating To-Do..."):
-                                if create_bc_todo(bc_session_user, bc_project_id, bc_todolist_id, bc_todo_title, sgid):
-                                    st.success("Created To-Do in Basecamp!")
-                                else: st.error("Basecamp creation failed.")
+                            if post_to_basecamp(bc_session_user, bc_project_id, bc_tool_type, bc_tool_id, bc_sub_id, bc_title, bc_content, sgid):
+                                st.success(f"✅ Posted to Basecamp {bc_tool_type}!")
+                            else:
+                                st.error("Basecamp post failed.")
                         else: st.error("Basecamp file upload failed.")
                         bio.seek(0)
 
@@ -650,6 +745,42 @@ with tab3:
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
     participants_context = st.session_state.saved_participants_input
     
+    # --- NEW: SAVE CHAT BUTTON ---
+    col1, col2 = st.columns([8, 2])
+    with col2:
+        if st.button("💾 Save Chat to Drive"):
+            if not st.session_state.gdrive_creds:
+                st.error("Please login to Drive first!")
+            elif not st.session_state.chat_history:
+                st.warning("No chat history to save.")
+            else:
+                try:
+                    # Create Doc
+                    chat_doc = Document()
+                    chat_doc.add_heading(f"AI Chat Log - {date_str}", 0)
+                    
+                    for msg in st.session_state.chat_history:
+                        role = "AI Assistant" if msg["role"] == "assistant" else "User"
+                        p = chat_doc.add_paragraph()
+                        p.add_run(f"{role}: ").bold = True
+                        p.add_run(msg["content"])
+                        chat_doc.add_paragraph("-" * 20)
+
+                    # Save to buffer
+                    chat_bio = io.BytesIO()
+                    chat_doc.save(chat_bio)
+                    chat_bio.seek(0)
+                    
+                    # Upload to "Chats" folder
+                    chat_fname = f"AI_{date_str}.docx"
+                    with st.spinner("Saving chat log..."):
+                        if upload_to_drive_user(chat_bio, chat_fname, "Chats"):
+                            st.success(f"✅ Chat saved as '{chat_fname}' in 'Chats' folder!")
+                        else:
+                            st.error("Failed to save chat.")
+                except Exception as e:
+                    st.error(f"Error saving chat: {e}")
+
     if not transcript_context:
         st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
     else:
@@ -683,33 +814,19 @@ with tab3:
                                 yield chunk.text
 
                     try:
-                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
                         You are an efficient, action-oriented meeting secretary.
-                        
-                        CONTEXT (PARTICIPANTS):
-                        {participants_context}
-                        (Use this to map "Speaker X" to real names.)
-
-                        TRANSCRIPT:
-                        {transcript_context}
-                        
-                        USER QUESTION:
-                        {prompt}
-                        
+                        CONTEXT: {participants_context}
+                        TRANSCRIPT: {transcript_context}
+                        USER QUESTION: {prompt}
                         STRICT RULES:
-                        1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
-                           - BAD: "John said the font is too small."
-                           - GOOD: "The font size needs to be increased." (Focus on the task)
-                           - GOOD: "The Client requested a larger font." (Focus on the role)
-                        2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
-                        3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
-                        4. **Conciseness:** Be brief and clear.
+                        1. Passive/Professional Voice.
+                        2. No Speaker IDs.
+                        3. Accuracy.
+                        4. Conciseness.
                         """
-                        
                         stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
                         response = st.write_stream(stream_text(stream_iterator))
-                        
                         st.session_state.chat_history.append({"role": "assistant", "content": response})
                     except Exception as e:
                         st.error("I couldn't generate a response. Please try again.")
