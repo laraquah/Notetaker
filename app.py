@@ -141,9 +141,9 @@ with st.sidebar:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
-        if AUTO_LOGIN_MODE:
-            # --- FIXED HTML BLOCK ---
-            st.markdown(f'''
+    if AUTO_LOGIN_MODE:
+            # --- KEEP THE 'f' BELOW ---
+            st.markdown(f"""
             <a href="{bc_auth_url}" target="_self">
                 <button style="
                     background-color:#ff4b4b; 
@@ -156,10 +156,8 @@ with st.sidebar:
                     Login to Basecamp
                 </button>
             </a>
-            ''', unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
-        else:
-            st.warning("Auto-login not configured in Secrets.")
 
     st.divider()
 
