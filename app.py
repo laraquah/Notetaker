@@ -7,7 +7,7 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 import tempfile
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor # Added RGBColor
+from docx.shared import Pt, Inches, RGBColor
 import io
 import time
 import subprocess
@@ -15,7 +15,7 @@ import pickle
 import json
 import datetime
 import pytz
-import re # Added for markdown parsing
+import re
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -138,7 +138,7 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI
+# 4. SIDEBAR UI (ENFORCED WORKFLOW)
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
@@ -220,8 +220,19 @@ with st.sidebar:
                 st.error(f"Config Error: {e}")
 
 # -----------------------------------------------------
-# 5. API CLIENTS
+# 5. SECURITY LOCK 🔒
 # -----------------------------------------------------
+if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
+    st.title("🔒 Access Restricted")
+    st.warning("Please complete the login process in the **sidebar** (Left) to unlock the AI Meeting Manager.")
+    st.info("1. Login to **Basecamp**\n2. Login to **Google Drive**")
+    st.stop() 
+
+# =====================================================
+#     MAIN APP LOGIC (Unlocked)
+# =====================================================
+
+# --- API CLIENTS ---
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
     storage_client = storage.Client(credentials=sa_creds)
@@ -234,16 +245,13 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS (DOC PARSING ADDED)
+# 6. HELPER FUNCTIONS (DOC PARSING)
 # -----------------------------------------------------
 
 def add_markdown_to_doc(doc, text):
-    """Intelligently parses markdown text (bold, bullets, tables) into Word elements."""
+    """Parses markdown text (bold, bullets, tables) into Word elements."""
     lines = text.split('\n')
-    
-    # Regex for markdown table row (e.g., "| Col 1 | Col 2 |")
     table_row_pattern = re.compile(r"^\|(.+)\|")
-    # Regex for separator row (e.g., "|---|---|")
     table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
     
     table_data = []
@@ -252,72 +260,54 @@ def add_markdown_to_doc(doc, text):
     for line in lines:
         stripped = line.strip()
         
-        # 1. Check for Table
         if table_row_pattern.match(stripped):
             if not table_sep_pattern.match(stripped):
-                # Parse row cells
                 cells = [c.strip() for c in stripped.strip('|').split('|')]
                 table_data.append(cells)
             in_table = True
             continue
         elif in_table and not table_row_pattern.match(stripped) and stripped == "":
-            # End of table block -> Render Table
             if table_data:
                 _render_word_table(doc, table_data)
                 table_data = []
             in_table = False
-            continue # Skip the empty line after table
+            continue
         elif in_table:
-            # Broken table line or end of table
              if table_data:
                 _render_word_table(doc, table_data)
                 table_data = []
              in_table = False
 
-        # 2. Headings (## Title)
         if stripped.startswith('##'):
             p = doc.add_heading(stripped.lstrip('#').strip(), level=2)
             p.paragraph_format.space_before = Pt(12)
             p.paragraph_format.space_after = Pt(6)
-            
-        # 3. Bullet Points (* Item)
         elif stripped.startswith('*') or stripped.startswith('-'):
             clean_text = stripped.lstrip('*- ').strip()
             p = doc.add_paragraph(style='List Bullet')
             _add_rich_text(p, clean_text)
-            
-        # 4. Normal Text
         elif stripped:
             p = doc.add_paragraph()
             _add_rich_text(p, stripped)
 
-    # If loop ends and table data exists
     if table_data:
         _render_word_table(doc, table_data)
 
 def _render_word_table(doc, rows):
-    """Helper to create a Word table from a list of lists."""
     if not rows: return
-    
-    # Determine max columns
     num_cols = max(len(r) for r in rows)
     table = doc.add_table(rows=len(rows), cols=num_cols)
     table.style = 'Table Grid'
-    
     for i, row_data in enumerate(rows):
         row_cells = table.rows[i].cells
         for j, text in enumerate(row_data):
             if j < len(row_cells):
-                # Make header bold
                 p = row_cells[j].paragraphs[0]
                 run = p.add_run(text)
-                if i == 0:
-                    run.bold = True
-
-    doc.add_paragraph("") # Spacer after table
+                if i == 0: run.bold = True
+    doc.add_paragraph("")
 
 def _add_rich_text(paragraph, text):
-    """Parses **bold** inside a line."""
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         if part.startswith('**') and part.endswith('**'):
@@ -546,7 +536,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
-    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -561,11 +550,15 @@ def add_formatted_text(cell, text):
         elif line.startswith('*'):
             clean = line.lstrip('*').lstrip("•").strip()
             if clean.startswith('**') and ':**' in clean:
-                parts = clean.split(':**', 1)
-                p.text = "•\t"
-                p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
-                p.add_run(parts[1].strip())
-                p.paragraph_format.left_indent = Inches(0.25)
+                try:
+                    parts = clean.split(':**', 1)
+                    p.text = "•\t"
+                    p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
+                    p.add_run(parts[1].strip())
+                    p.paragraph_format.left_indent = Inches(0.25)
+                except:
+                    p.text = f"•\t{clean}"
+                    p.paragraph_format.left_indent = Inches(0.25)
             else:
                 p.text = f"•\t{clean}"
                 p.paragraph_format.left_indent = Inches(0.25)
@@ -782,7 +775,6 @@ with tab3:
                         role = "AI Assistant" if msg["role"] == "assistant" else "User"
                         p = chat_doc.add_paragraph()
                         p.add_run(f"{role}: ").bold = True
-                        # Parse markdown for nicer doc
                         add_markdown_to_doc(chat_doc, msg["content"])
                         chat_doc.add_paragraph("_" * 50)
 
