@@ -141,10 +141,10 @@ with st.sidebar:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
-    if AUTO_LOGIN_MODE:
-            # --- KEEP THE 'f' BELOW ---
+        if AUTO_LOGIN_MODE:
+            # --- FIX: Use target="_top" to break out of Streamlit iframe ---
             st.markdown(f"""
-            <a href="{bc_auth_url}" target="_self">
+            <a href="{bc_auth_url}" target="_top">
                 <button style="
                     background-color:#ff4b4b; 
                     color:white; 
@@ -158,6 +158,8 @@ with st.sidebar:
             </a>
             """, unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
+        else:
+            st.warning("Auto-login not configured in Secrets.")
 
     st.divider()
 
@@ -463,6 +465,7 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
+            # Auto-fill logic
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
             st.session_state.auto_client_reps = "\n".join(c_list)
@@ -490,7 +493,10 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
+        
+        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
+        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -639,12 +645,13 @@ with tab3:
                                 yield chunk.text
 
                     try:
+                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
                         full_prompt = f"""
-                        You are an efficient, action-oriented meeting secretary.
+                        You are an efficient, action-oriented meeting secretary who was present at this meeting.
                         
                         CONTEXT (PARTICIPANTS):
                         {participants_context}
-                        (Use this to map "Speaker X" to real names.)
+                        (These are the real names. Map "Speaker X" to these real names based on the conversation flow.)
 
                         TRANSCRIPT:
                         {transcript_context}
@@ -653,13 +660,15 @@ with tab3:
                         {prompt}
                         
                         STRICT RULES:
-                        1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
-                           - BAD: "John said the font is too small."
-                           - GOOD: "The font size needs to be increased." (Focus on the task)
-                           - GOOD: "The Client requested a larger font." (Focus on the role)
-                        2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
-                        3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
-                        4. **Conciseness:** Be brief and clear.
+                        1. **Voice:** Write as if you are recording the official minutes/log. Use professional, objective language.
+                        2. **Action-First Phrasing:** Prioritize the *action* or *decision* over who said it, unless the person is critical context.
+                           - BAD: "John wants the font to be blue."
+                           - GOOD: "The font needs to be changed to blue." (Passive voice / Action focus)
+                           - GOOD: "The Client requires a change to the header image." (Role focus)
+                        3. **No Speaker IDs:** NEVER use "Speaker 1", "Speaker 2". Use real names or roles (Client/Company Rep).
+                        4. **Generalization:** Do not assume names are "John". Use the names provided in the CONTEXT list.
+                        5. If the answer is not in the transcript, say "That was not discussed."
+                        6. Be concise.
                         """
                         
                         stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
