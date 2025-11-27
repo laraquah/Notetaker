@@ -49,7 +49,7 @@ try:
         BASECAMP_REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
         AUTO_LOGIN_MODE = True
     else:
-        BASECAMP_REDIRECT_URI = "https://www.google.com"
+        BASECAMP_REDIRECT_URI = "[https://www.google.com](https://www.google.com)"
         AUTO_LOGIN_MODE = False
 
 except Exception as e:
@@ -57,9 +57,9 @@ except Exception as e:
     st.stop()
 
 # URLs
-BASECAMP_AUTH_URL = "https://launchpad.37signals.com/authorization/new"
-BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
-BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
+BASECAMP_AUTH_URL = "[https://launchpad.37signals.com/authorization/new](https://launchpad.37signals.com/authorization/new)"
+BASECAMP_TOKEN_URL = "[https://launchpad.37signals.com/authorization/token](https://launchpad.37signals.com/authorization/token)"
+BASECAMP_API_BASE = f"[https://3.basecampapi.com/](https://3.basecampapi.com/){BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 
 # -----------------------------------------------------
@@ -68,7 +68,7 @@ BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 def fetch_basecamp_name(token_dict):
     """Calls Basecamp Identity API to get the user's real name."""
     try:
-        identity_url = "https://launchpad.37signals.com/authorization.json"
+        identity_url = "[https://launchpad.37signals.com/authorization.json](https://launchpad.37signals.com/authorization.json)"
         headers = {
             "Authorization": f"Bearer {token_dict['access_token']}",
             "User-Agent": "AI Meeting Notes App"
@@ -84,11 +84,8 @@ def fetch_basecamp_name(token_dict):
     return ""
 
 # -----------------------------------------------------
-# 3. SESSION STATE & AUTO-LOGIN HANDLER
+# 3. STATE & AUTO-LOGIN HANDLER
 # -----------------------------------------------------
-
-if 'gdrive_creds_json' not in st.session_state:
-    st.session_state.gdrive_creds_json = None
 if 'gdrive_creds' not in st.session_state:
     st.session_state.gdrive_creds = None
 if 'basecamp_token' not in st.session_state:
@@ -96,17 +93,7 @@ if 'basecamp_token' not in st.session_state:
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
 
-# --- FIX: IMMEDIATE GOOGLE RE-LOGIN ---
-if st.session_state.gdrive_creds_json and not st.session_state.gdrive_creds:
-    try:
-        creds = Credentials.from_authorized_user_info(
-            json.loads(st.session_state.gdrive_creds_json)
-        )
-        st.session_state.gdrive_creds = creds
-    except Exception as e:
-        st.session_state.gdrive_creds_json = None
-
-# --- AUTO-LOGIN HANDLER (BASECAMP) ---
+# Check for Basecamp Return Code
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -135,23 +122,20 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI
+# 4. SIDEBAR UI (ENFORCED WORKFLOW)
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
     
-    # --- ORDER WARNING ---
-    if not st.session_state.basecamp_token:
-        st.info("💡 **Tip:** Login to Basecamp *first*.")
-
-    # --- 1. BASECAMP LOGIN ---
-    st.subheader("1. Basecamp")
+    # --- STEP 1: BASECAMP (Must happen first) ---
+    st.markdown("### Step 1: Basecamp")
+    
     if st.session_state.basecamp_token:
         st.success(f"✅ Connected as {st.session_state.user_real_name}")
         if st.button("Logout Basecamp"):
             st.session_state.basecamp_token = None
             st.session_state.user_real_name = ""
-            st.session_state.gdrive_creds = None # Clear drive to force clean state
+            st.session_state.gdrive_creds = None
             st.rerun()
     else:
         bc_oauth = OAuth2Session(BASECAMP_CLIENT_ID, redirect_uri=BASECAMP_REDIRECT_URI)
@@ -159,20 +143,22 @@ with st.sidebar:
         
         if AUTO_LOGIN_MODE:
             # --- FIXED HTML BUTTON ---
-            # Using a styled 'a' tag instead of nested button to ensure clickability
+            # This is an <a> tag styled to look like a button. 
+            # target="_top" forces it to break out of the Streamlit iframe.
             st.markdown(f"""
-            <a href="{bc_auth_url}" target="_top" style="text-decoration: none;">
-                <div style="
-                    background-color: #ff4b4b;
-                    color: white;
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.5rem;
-                    text-align: center;
-                    font-weight: bold;
-                    border: 1px solid #ff4b4b;
-                ">
-                    Login to Basecamp
-                </div>
+            <a href="{bc_auth_url}" target="_top" style="
+                display: inline-block;
+                background-color: #ff4b4b;
+                color: white;
+                padding: 0.5rem 1rem;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-weight: bold;
+                text-align: center;
+                border: 1px solid #ff4b4b;
+                width: 100%;
+            ">
+                Login to Basecamp
             </a>
             """, unsafe_allow_html=True)
             st.caption("You must log in to Basecamp first.")
@@ -181,7 +167,6 @@ with st.sidebar:
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
             bc_code = st.text_input("Paste Basecamp Code:", key="bc_code")
             if bc_code:
-                # Manual handling for fallback mode
                 try:
                     payload = {
                         "type": "web_server",
@@ -202,8 +187,8 @@ with st.sidebar:
 
     st.divider()
 
-    # --- 2. GOOGLE DRIVE LOGIN ---
-    st.subheader("2. Google Drive")
+    # --- STEP 2: GOOGLE DRIVE ---
+    st.markdown("### Step 2: Google Drive")
     
     if not st.session_state.basecamp_token:
         st.info("🔒 Please complete Step 1 first.")
@@ -212,13 +197,12 @@ with st.sidebar:
             st.success("✅ Connected")
             if st.button("Logout Drive"):
                 st.session_state.gdrive_creds = None
-                st.session_state.gdrive_creds_json = None
                 st.rerun()
         else:
             try:
                 flow = Flow.from_client_config(
                     GDRIVE_CLIENT_CONFIG,
-                    scopes=["https://www.googleapis.com/auth/drive"],
+                    scopes=["[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"],
                     redirect_uri="urn:ietf:wg:oauth:2.0:oob"
                 )
                 auth_url, _ = flow.authorization_url(prompt='consent')
@@ -229,7 +213,6 @@ with st.sidebar:
                 if g_code:
                     flow.fetch_token(code=g_code)
                     st.session_state.gdrive_creds = flow.credentials
-                    st.session_state.gdrive_creds_json = flow.credentials.to_json()
                     st.rerun()
             except Exception as e:
                 st.error(f"Config Error: {e}")
@@ -534,7 +517,10 @@ with tab2:
         absent = st.text_input("Absent")
     with row2:
         time_obj = st.text_input("Time", value=sg_now.strftime("%I:%M %p"))
+        
+        # --- AUTO FILL PREPARED BY ---
         default_prepared_by = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
+        
         prepared_by = st.text_input("Prepared by", value=default_prepared_by)
         ifoundries_rep = st.text_input("iFoundries Reps", value=st.session_state.auto_ifoundries_reps)
     
@@ -657,61 +643,59 @@ with tab3:
             st.session_state.chat_history = []
             st.rerun()
 
-        # --- Standard Chat Layout (Input at bottom) ---
-        # We use standard messages first, then input. Streamlit handles the "stacking" automatically.
-        for message in st.session_state.chat_history:
-            if message["role"] == "user":
-                with st.chat_message("user", avatar="👤"):
-                    st.markdown(message["content"])
-            else:
-                with st.chat_message("assistant", avatar="🤖"):
-                    st.markdown(message["content"])
+        chat_container = st.container(height=500)
+        
+        with chat_container:
+            for message in st.session_state.chat_history:
+                if message["role"] == "user":
+                    with st.chat_message("user", avatar="👤"):
+                        st.markdown(message["content"])
+                else:
+                    with st.chat_message("assistant", avatar="🤖"):
+                        st.markdown(message["content"])
 
         if prompt := st.chat_input("Ask a question about the meeting..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
-            # Force a rerun to display the new user message immediately at the bottom
-            st.rerun()
+            with chat_container:
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(prompt)
 
-    # --- Response Generation (Runs after Rerun) ---
-    # This block checks if the last message was from the user (meaning we just reran)
-    if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(st.session_state.chat_history[-1]["content"])
-            
-        with st.chat_message("assistant", avatar="🤖"):
-            def stream_text(response_iterator):
-                for chunk in response_iterator:
-                    if chunk.parts:
-                        yield chunk.text
+            with chat_container:
+                with st.chat_message("assistant", avatar="🤖"):
+                    def stream_text(response_iterator):
+                        for chunk in response_iterator:
+                            if chunk.parts:
+                                yield chunk.text
 
-            try:
-                full_prompt = f"""
-                You are an efficient, action-oriented meeting secretary.
-                
-                CONTEXT (PARTICIPANTS):
-                {participants_context}
-                (Use this to map "Speaker X" to real names.)
+                    try:
+                        # --- FINAL "OFFICIAL LOG" STYLE PROMPT ---
+                        full_prompt = f"""
+                        You are an efficient, action-oriented meeting secretary.
+                        
+                        CONTEXT (PARTICIPANTS):
+                        {participants_context}
+                        (Use this to map "Speaker X" to real names.)
 
-                TRANSCRIPT:
-                {transcript_context}
-                
-                USER QUESTION:
-                {st.session_state.chat_history[-1]["content"]}
-                
-                STRICT RULES:
-                1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
-                   - BAD: "John said the font is too small."
-                   - GOOD: "The font size needs to be increased." (Focus on the task)
-                   - GOOD: "The Client requested a larger font." (Focus on the role)
-                2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
-                3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
-                4. **Conciseness:** Be brief and clear.
-                """
-                
-                stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
-                response = st.write_stream(stream_text(stream_iterator))
-                
-                st.session_state.chat_history.append({"role": "assistant", "content": response})
-            except Exception as e:
-                st.error("I couldn't generate a response. Please try again.")
+                        TRANSCRIPT:
+                        {transcript_context}
+                        
+                        USER QUESTION:
+                        {prompt}
+                        
+                        STRICT RULES:
+                        1. **Passive/Professional Voice:** Focus on the action/decision, NOT the speaker, unless it is a direct assignment.
+                           - BAD: "John said the font is too small."
+                           - GOOD: "The font size needs to be increased." (Focus on the task)
+                           - GOOD: "The Client requested a larger font." (Focus on the role)
+                        2. **No Speaker IDs:** NEVER use "Speaker 1" or "Speaker 2".
+                        3. **Accuracy:** Use the transcript as your only source. If not mentioned, say "That was not discussed."
+                        4. **Conciseness:** Be brief and clear.
+                        """
+                        
+                        stream_iterator = gemini_model.generate_content(full_prompt, stream=True)
+                        response = st.write_stream(stream_text(stream_iterator))
+                        
+                        st.session_state.chat_history.append({"role": "assistant", "content": response})
+                    except Exception as e:
+                        st.error("I couldn't generate a response. Please try again.")
