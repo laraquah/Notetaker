@@ -7,6 +7,7 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 import tempfile
 from docx import Document
+from docx.shared import Pt, Inches, RGBColor # Added RGBColor
 import io
 import time
 import subprocess
@@ -14,6 +15,7 @@ import pickle
 import json
 import datetime
 import pytz
+import re # Added for markdown parsing
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -30,7 +32,6 @@ from google.oauth2 import service_account
 # --- Import Basecamp & formatting tools ---
 import requests
 from requests_oauthlib import OAuth2Session
-from docx.shared import Pt, Inches
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
@@ -137,7 +138,7 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
         st.error(f"Auto-login failed: {e}")
 
 # -----------------------------------------------------
-# 4. SIDEBAR UI (ENFORCED WORKFLOW)
+# 4. SIDEBAR UI
 # -----------------------------------------------------
 with st.sidebar:
     st.title("🔐 Login")
@@ -158,7 +159,7 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            # Native Streamlit Link Button
+            # Use native button for reliability
             st.link_button("Login to Basecamp", bc_auth_url, type="primary")
             st.caption("Opens in a new tab. Close it after logging in.")
         else:
@@ -219,19 +220,8 @@ with st.sidebar:
                 st.error(f"Config Error: {e}")
 
 # -----------------------------------------------------
-# 5. SECURITY CHECK: IS USER FULLY LOGGED IN?
+# 5. API CLIENTS
 # -----------------------------------------------------
-# Only proceed if BOTH Basecamp and Google Drive are connected
-if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
-    st.title("🔒 Access Restricted")
-    st.warning("Please log in to **Basecamp** and **Google Drive** in the sidebar to unlock the AI Meeting Manager.")
-    st.stop() # Halts the script here.
-
-# =====================================================
-#     MAIN APP LOGIC (Unlocked)
-# =====================================================
-
-# --- API CLIENTS (ROBOT) SETUP ---
 try:
     sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
     storage_client = storage.Client(credentials=sa_creds)
@@ -244,8 +234,99 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS (DOC PARSING ADDED)
 # -----------------------------------------------------
+
+def add_markdown_to_doc(doc, text):
+    """Intelligently parses markdown text (bold, bullets, tables) into Word elements."""
+    lines = text.split('\n')
+    
+    # Regex for markdown table row (e.g., "| Col 1 | Col 2 |")
+    table_row_pattern = re.compile(r"^\|(.+)\|")
+    # Regex for separator row (e.g., "|---|---|")
+    table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
+    
+    table_data = []
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+        
+        # 1. Check for Table
+        if table_row_pattern.match(stripped):
+            if not table_sep_pattern.match(stripped):
+                # Parse row cells
+                cells = [c.strip() for c in stripped.strip('|').split('|')]
+                table_data.append(cells)
+            in_table = True
+            continue
+        elif in_table and not table_row_pattern.match(stripped) and stripped == "":
+            # End of table block -> Render Table
+            if table_data:
+                _render_word_table(doc, table_data)
+                table_data = []
+            in_table = False
+            continue # Skip the empty line after table
+        elif in_table:
+            # Broken table line or end of table
+             if table_data:
+                _render_word_table(doc, table_data)
+                table_data = []
+             in_table = False
+
+        # 2. Headings (## Title)
+        if stripped.startswith('##'):
+            p = doc.add_heading(stripped.lstrip('#').strip(), level=2)
+            p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(6)
+            
+        # 3. Bullet Points (* Item)
+        elif stripped.startswith('*') or stripped.startswith('-'):
+            clean_text = stripped.lstrip('*- ').strip()
+            p = doc.add_paragraph(style='List Bullet')
+            _add_rich_text(p, clean_text)
+            
+        # 4. Normal Text
+        elif stripped:
+            p = doc.add_paragraph()
+            _add_rich_text(p, stripped)
+
+    # If loop ends and table data exists
+    if table_data:
+        _render_word_table(doc, table_data)
+
+def _render_word_table(doc, rows):
+    """Helper to create a Word table from a list of lists."""
+    if not rows: return
+    
+    # Determine max columns
+    num_cols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+    table.style = 'Table Grid'
+    
+    for i, row_data in enumerate(rows):
+        row_cells = table.rows[i].cells
+        for j, text in enumerate(row_data):
+            if j < len(row_cells):
+                # Make header bold
+                p = row_cells[j].paragraphs[0]
+                run = p.add_run(text)
+                if i == 0:
+                    run.bold = True
+
+    doc.add_paragraph("") # Spacer after table
+
+def _add_rich_text(paragraph, text):
+    """Parses **bold** inside a line."""
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            run = paragraph.add_run(part[2:-2])
+            run.bold = True
+        else:
+            paragraph.add_run(part)
+
+# --- Standard Helpers ---
 
 def get_basecamp_session_user():
     if not st.session_state.basecamp_token: return None
@@ -263,30 +344,19 @@ def upload_to_gcs(file_path, destination_blob_name):
         st.error(f"GCS Upload Error: {e}")
         return None
 
-# --- SMART FOLDER MANAGEMENT ---
 def get_or_create_folder(service, folder_name):
-    """Finds a folder by name in root, or creates it."""
     try:
-        # Search for the folder
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
         results = service.files().list(q=query, fields="files(id)").execute()
         items = results.get('files', [])
-        
-        if items:
-            return items[0]['id']
+        if items: return items[0]['id']
         else:
-            file_metadata = {
-                'name': folder_name,
-                'mimeType': 'application/vnd.google-apps.folder'
-            }
+            file_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
             folder = service.files().create(body=file_metadata, fields='id').execute()
             return folder.get('id')
-    except Exception as e:
-        st.error(f"Drive Folder Error: {e}")
-        return None
+    except Exception as e: return None
 
 def upload_to_drive_user(file_stream, file_name, target_folder_name):
-    """Uploads file to a specific named folder."""
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
@@ -305,7 +375,6 @@ def upload_to_drive_user(file_stream, file_name, target_folder_name):
         st.error(f"Google Drive Upload Error: {e}")
         return None
 
-# --- BASECAMP HELPERS ---
 def get_basecamp_projects(_session):
     try:
         response = _session.get(f"{BASECAMP_API_BASE}/projects.json")
@@ -477,6 +546,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
+    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -491,15 +561,11 @@ def add_formatted_text(cell, text):
         elif line.startswith('*'):
             clean = line.lstrip('*').lstrip("•").strip()
             if clean.startswith('**') and ':**' in clean:
-                try:
-                    parts = clean.split(':**', 1)
-                    p.text = "•\t"
-                    p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
-                    p.add_run(parts[1].strip())
-                    p.paragraph_format.left_indent = Inches(0.25)
-                except:
-                    p.text = f"•\t{clean}"
-                    p.paragraph_format.left_indent = Inches(0.25)
+                parts = clean.split(':**', 1)
+                p.text = "•\t"
+                p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
+                p.add_run(parts[1].strip())
+                p.paragraph_format.left_indent = Inches(0.25)
             else:
                 p.text = f"•\t{clean}"
                 p.paragraph_format.left_indent = Inches(0.25)
@@ -598,7 +664,6 @@ with tab2:
     if do_basecamp:
         bc_session_user = get_basecamp_session_user()
         try:
-            # 1. Select Project
             projects_list = get_basecamp_projects(bc_session_user)
             if not projects_list:
                 st.warning("No active Basecamp projects found.")
@@ -607,11 +672,7 @@ with tab2:
                 
                 if selected_project_name:
                     bc_project_id = next(p[1] for p in projects_list if p[0] == selected_project_name)
-                    
-                    # 2. Select Tool Type
                     bc_tool_type = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs & Files"], index=0)
-                    
-                    # Get Tools (Dock)
                     project_tools = get_project_tools(bc_session_user, bc_project_id)
                     
                     if bc_tool_type == "To-dos":
@@ -706,7 +767,6 @@ with tab3:
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
     participants_context = st.session_state.saved_participants_input
     
-    # --- SAVE CHAT BUTTON ---
     col1, col2 = st.columns([8, 2])
     with col2:
         if st.button("💾 Save Chat to Drive"):
@@ -722,8 +782,9 @@ with tab3:
                         role = "AI Assistant" if msg["role"] == "assistant" else "User"
                         p = chat_doc.add_paragraph()
                         p.add_run(f"{role}: ").bold = True
-                        p.add_run(msg["content"])
-                        chat_doc.add_paragraph("-" * 20)
+                        # Parse markdown for nicer doc
+                        add_markdown_to_doc(chat_doc, msg["content"])
+                        chat_doc.add_paragraph("_" * 50)
 
                     chat_bio = io.BytesIO()
                     chat_doc.save(chat_bio)
@@ -732,7 +793,7 @@ with tab3:
                     
                     with st.spinner("Saving chat log..."):
                         if upload_to_drive_user(chat_bio, chat_fname, "Chats"):
-                            st.success(f"✅ Chat saved as '{chat_fname}' in 'Chats' folder!")
+                            st.success(f"✅ Saved to 'Chats' folder in Drive!")
                         else: st.error("Failed to save chat.")
                 except Exception as e: st.error(f"Error saving chat: {e}")
 
