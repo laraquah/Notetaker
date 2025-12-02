@@ -26,7 +26,7 @@ import google.generativeai as genai
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload # Added Download
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2 import service_account
 
 # --- Import Basecamp & formatting tools ---
@@ -159,25 +159,9 @@ with st.sidebar:
         bc_auth_url, _ = bc_oauth.authorization_url(BASECAMP_AUTH_URL, type="web_server")
         
         if AUTO_LOGIN_MODE:
-            st.markdown(f"""
-            <a href="{bc_auth_url}" target="_top" style="text-decoration:none;">
-                <div style="
-                    background-color: #ff4b4b;
-                    color: white;
-                    padding: 10px 20px;
-                    border-radius: 5px;
-                    text-align: center;
-                    font-weight: bold;
-                    cursor: pointer;
-                    display: block;
-                    width: 100%;
-                    box-sizing: border-box;
-                ">
-                    Login to Basecamp
-                </div>
-            </a>
-            """, unsafe_allow_html=True)
-            st.caption("You must log in to Basecamp first.")
+            # --- USE NATIVE LINK BUTTON (RELIABLE) ---
+            st.link_button("Login to Basecamp", bc_auth_url, type="primary")
+            st.caption("Opens in a new tab. Please close it after login.")
         else:
             st.warning("Auto-login not configured in Secrets.")
             st.markdown(f"👉 [**Authorize Basecamp**]({bc_auth_url})")
@@ -224,7 +208,7 @@ with st.sidebar:
                 )
                 auth_url, _ = flow.authorization_url(prompt='consent')
                 
-                st.markdown(f"👉 [**Click to Authorize Drive**]({auth_url})")
+                st.link_button("Login to Google Drive", auth_url)
                 g_code = st.text_input("Paste Google Code:", key="g_code")
                 
                 if g_code:
@@ -378,42 +362,33 @@ def upload_to_drive_user(file_stream, file_name, target_folder_name):
         st.error(f"Google Drive Upload Error: {e}")
         return None
 
-# --- NEW: Function to save raw analysis data (Brain File) to Drive ---
 def save_analysis_data_to_drive(data_dict, filename):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        folder_id = get_or_create_folder(service, "Meeting_Data") # Saves to 'Meeting_Data' folder
+        folder_id = get_or_create_folder(service, "Meeting_Data")
         if not folder_id: return None
 
-        # Convert dict to JSON string bytes
         json_str = json.dumps(data_dict, indent=2)
         fh = io.BytesIO(json_str.encode('utf-8'))
-
         file_metadata = {"name": filename, "parents": [folder_id]}
         media = MediaIoBaseUpload(fh, mimetype='application/json')
-        
         file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
         return file.get("id")
-    except Exception as e:
-        st.error(f"Failed to save meeting data: {e}")
-        return None
+    except Exception as e: return None
 
 def list_past_meetings():
-    """Lists JSON files from the 'Meeting_Data' folder."""
     if not st.session_state.gdrive_creds: return []
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
         folder_id = get_or_create_folder(service, "Meeting_Data")
         if not folder_id: return []
-
         query = f"'{folder_id}' in parents and mimeType='application/json' and trashed=false"
         results = service.files().list(q=query, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
         return results.get('files', [])
     except: return []
 
 def load_meeting_data(file_id):
-    """Downloads and parses a JSON file from Drive."""
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
@@ -423,12 +398,9 @@ def load_meeting_data(file_id):
         done = False
         while done is False:
             status, done = downloader.next_chunk()
-        
         fh.seek(0)
         return json.load(fh)
-    except Exception as e:
-        st.error(f"Error loading file: {e}")
-        return None
+    except Exception as e: return None
 
 def get_basecamp_projects(_session):
     try:
@@ -468,11 +440,9 @@ def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, co
         if tool_type == "To-dos":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{sub_id}/todos.json"
             payload = {"content": title, "description": content + attach_html}
-            
         elif tool_type == "Message Board":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/message_boards/{tool_id}/messages.json"
             payload = {"subject": title, "content": content + attach_html, "status": "active"}
-            
         elif tool_type == "Docs & Files":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/vaults/{tool_id}/uploads.json"
             payload = {"attachable_sgid": attachment_sgid, "base_name": title, "content": content}
@@ -601,7 +571,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         except: pass
 
 def add_formatted_text(cell, text):
-    """Original simple parser for main doc."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -677,7 +646,6 @@ with tab1:
             else: 
                 st.session_state.ai_results = res
                 
-                # --- AUTO SAVE ANALYSIS TO DRIVE ---
                 if st.session_state.gdrive_creds:
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
                     save_data = {
@@ -918,7 +886,6 @@ with tab3:
                     except Exception as e:
                         st.error("I couldn't generate a response. Please try again.")
 
-# --- TAB 4: HISTORY ---
 with tab4:
     st.header("📂 Meeting History")
     st.caption("Load past meeting analysis to review notes or continue chatting.")
@@ -934,9 +901,7 @@ with tab4:
         if not files:
             st.warning("No past meeting data found in 'Meeting_Data' folder.")
         else:
-            # Create a map of "Display Name" -> "File ID"
             file_map = {f"{f['name']} ({f.get('createdTime', '')[:10]})": f['id'] for f in files}
-            
             selected_file = st.selectbox("Select a past meeting:", options=list(file_map.keys()))
             
             if st.button("📂 Load Selected Meeting"):
@@ -944,12 +909,10 @@ with tab4:
                 with st.spinner("Loading meeting data..."):
                     data = load_meeting_data(file_id)
                     if data:
-                        # Restore State
                         st.session_state.ai_results = data.get("ai_results", {})
                         st.session_state.saved_participants_input = data.get("participants", "")
-                        st.session_state.chat_history = [] # Clear chat for new context
+                        st.session_state.chat_history = [] 
                         
-                        # Auto-fill Reps again for Tab 2
                         p_input = st.session_state.saved_participants_input
                         c_list = [l.replace("(Client)","").strip() for l in p_input.split('\n') if "(Client)" in l]
                         i_list = [l.replace("(iFoundries)","").strip() for l in p_input.split('\n') if "(iFoundries)" in l]
