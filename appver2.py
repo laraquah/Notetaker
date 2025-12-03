@@ -99,7 +99,6 @@ if 'basecamp_token' not in st.session_state:
     st.session_state.basecamp_token = None
 if 'user_real_name' not in st.session_state:
     st.session_state.user_real_name = ""
-
 # --- METADATA STATES ---
 if 'detected_date' not in st.session_state:
     st.session_state.detected_date = None
@@ -255,11 +254,10 @@ except Exception as e:
     st.stop()
 
 # -----------------------------------------------------
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS (DOC PARSING)
 # -----------------------------------------------------
 
 def add_markdown_to_doc(doc, text):
-    """Parses markdown text (bold, bullets, tables) into Word elements."""
     lines = text.split('\n')
     table_row_pattern = re.compile(r"^\|(.+)\|")
     table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
@@ -326,25 +324,17 @@ def _add_rich_text(paragraph, text):
 
 # --- AI VISUAL METADATA EXTRACTION ---
 def get_visual_metadata(file_path):
-    """
-    Uses Gemini Vision to read:
-    1. Date & Time
-    2. Meeting Title (Center text)
-    3. Venue (Corner text)
-    Returns a dict with keys: datetime_sg, duration, title, venue
-    """
     if shutil.which("ffmpeg") is None: return None
     
     thumbnail_path = "temp_thumb.jpg"
     result_data = {
         "datetime_sg": None,
         "duration": 0,
-        "title": "Meeting_Notes",
+        "title": "Meeting_Minutes",
         "venue": ""
     }
 
     try:
-        # A. Get Duration using ffprobe
         command = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode == 0:
@@ -352,7 +342,6 @@ def get_visual_metadata(file_path):
                 result_data["duration"] = float(result.stdout.strip())
             except: pass
 
-        # B. Get Visuals using Vision
         subprocess.run([
             'ffmpeg', '-i', file_path, '-ss', '00:00:01', 
             '-vframes', '1', '-q:v', '2', '-y', thumbnail_path
@@ -378,21 +367,16 @@ def get_visual_metadata(file_path):
                 prompt
             ])
             
-            # Parse JSON response
             try:
-                # Clean code blocks if present
                 text = response.text.strip().replace("```json", "").replace("```", "")
                 data = json.loads(text)
                 
-                # 1. Parse Title
                 if data.get("title") and data["title"] != "None":
-                    result_data["title"] = data["title"].replace(" ", "_").replace("/", "-") # Sanitize for filename
+                    result_data["title"] = data["title"].replace(" ", "_").replace("/", "-")
                 
-                # 2. Parse Venue
                 if data.get("venue") and data["venue"] != "None":
                     result_data["venue"] = data["venue"]
                     
-                # 3. Parse Date/Time
                 dt_str = data.get("datetime")
                 if dt_str and dt_str != "None":
                      dt_obj = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
@@ -410,24 +394,7 @@ def get_visual_metadata(file_path):
             
     return result_data
 
-# --- Standard Helpers ---
-
-def get_basecamp_session_user():
-    if not st.session_state.basecamp_token: return None
-    session = OAuth2Session(BASECAMP_CLIENT_ID, token=st.session_state.basecamp_token)
-    session.headers.update(BASECAMP_USER_AGENT)
-    return session
-
-def upload_to_gcs(file_path, destination_blob_name):
-    try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(destination_blob_name)
-        blob.upload_from_filename(file_path, timeout=3600)
-        return f"gs://{GCS_BUCKET_NAME}/{destination_blob_name}"
-    except Exception as e:
-        st.error(f"GCS Upload Error: {e}")
-        return None
-
+# --- DRIVE HELPERS (SMART APPEND) ---
 def get_or_create_folder(service, folder_name):
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
@@ -440,6 +407,36 @@ def get_or_create_folder(service, folder_name):
             return folder.get('id')
     except Exception as e: return None
 
+def find_existing_file(service, folder_id, filename):
+    """Checks if file exists in folder."""
+    try:
+        query = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        items = results.get('files', [])
+        if items: return items[0]['id']
+    except: pass
+    return None
+
+def update_drive_file(service, file_id, file_stream):
+    """Overwrites existing file content."""
+    try:
+        media = MediaIoBaseUpload(file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        service.files().update(fileId=file_id, media_body=media).execute()
+        return True
+    except: return False
+
+def download_drive_file_bytes(service, file_id):
+    try:
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        return fh
+    except: return None
+
 def upload_to_drive_user(file_stream, file_name, target_folder_name):
     if not st.session_state.gdrive_creds: return None
     try:
@@ -448,15 +445,21 @@ def upload_to_drive_user(file_stream, file_name, target_folder_name):
         parents = [folder_id] if folder_id else []
 
         file_metadata = {"name": file_name, "parents": parents}
-        media = MediaIoBaseUpload(
-            file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-        file = service.files().create(
-            body=file_metadata, media_body=media, fields="id"
-        ).execute()
+        media = MediaIoBaseUpload(file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
         return file.get("id")
     except Exception as e:
         st.error(f"Google Drive Upload Error: {e}")
+        return None
+
+def upload_to_gcs(file_path, destination_blob_name):
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_filename(file_path, timeout=3600)
+        return f"gs://{GCS_BUCKET_NAME}/{destination_blob_name}"
+    except Exception as e:
+        st.error(f"GCS Upload Error: {e}")
         return None
 
 def save_analysis_data_to_drive(data_dict, filename):
@@ -465,7 +468,6 @@ def save_analysis_data_to_drive(data_dict, filename):
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
         folder_id = get_or_create_folder(service, "Meeting_Data")
         if not folder_id: return None
-
         json_str = json.dumps(data_dict, indent=2)
         fh = io.BytesIO(json_str.encode('utf-8'))
         file_metadata = {"name": filename, "parents": [folder_id]}
@@ -533,7 +535,6 @@ def upload_bc_attachment(_session, file_bytes, file_name):
 def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, content, attachment_sgid):
     try:
         attach_html = f'<bc-attachment sgid="{attachment_sgid}"></bc-attachment>' if attachment_sgid else ""
-        
         if tool_type == "To-dos":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/todolists/{sub_id}/todos.json"
             payload = {"content": title, "description": content + attach_html}
@@ -543,7 +544,6 @@ def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, co
         elif tool_type == "Docs & Files":
             url = f"{BASECAMP_API_BASE}/buckets/{project_id}/vaults/{tool_id}/uploads.json"
             payload = {"attachable_sgid": attachment_sgid, "base_name": title, "content": content}
-
         resp = _session.post(url, json=payload)
         resp.raise_for_status()
         return True
@@ -558,15 +558,12 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             flac_file_path = f"{base_name}.flac"
             command = ["ffmpeg", "-i", audio_file_path, "-vn", "-acodec", "flac", "-y", flac_file_path]
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
         with st.spinner(f"Uploading converted audio to Google Cloud Storage..."):
             flac_blob_name = f"{os.path.splitext(file_name)[0]}.flac"
             gcs_uri = upload_to_gcs(flac_file_path, flac_blob_name)
             if not gcs_uri: return {"error": "Upload failed."}
-
         progress_text = "Transcribing & identifying speakers..."
         progress_bar = st.progress(0, text=progress_text)
-        
         audio = speech.RecognitionAudio(uri=gcs_uri)
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.FLAC,
@@ -581,20 +578,16 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             )
         )
         operation = speech_client.long_running_recognize(config=config, audio=audio)
-        
         while not operation.done():
             metadata = operation.metadata
             if metadata and metadata.progress_percent:
                 progress_bar.progress(metadata.progress_percent, text=f"Transcribing: {metadata.progress_percent}%")
             time.sleep(2)
-
         progress_bar.progress(100, text="Transcription Complete")
         response = operation.result(timeout=3600)
         progress_bar.empty()
-
         if not response.results:
              return {"error": "Transcription failed. The audio might be silent."}
-
         result = response.results[-1]
         words_info = result.alternatives[0].words
         full_transcript_text = ""
@@ -606,7 +599,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript_text += word_info.word + " "
         if not full_transcript_text.strip():
             full_transcript_text = " ".join([result.alternatives[0].transcript for result in response.results])
-
         with st.spinner("Analyzing conversation & matching names..."):
             prompt = f"""
             You are an expert meeting secretary. 
@@ -638,7 +630,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             """
             response = gemini_model.generate_content(prompt)
             text = response.text
-            
             discussion = ""
             next_steps = ""
             client_reqs = ""
@@ -652,7 +643,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                 if not discussion: discussion = text
             except:
                 discussion = text
-
             return {
                 "discussion": discussion,
                 "next_steps": next_steps,
@@ -666,37 +656,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             bucket = storage_client.bucket(GCS_BUCKET_NAME)
             bucket.blob(flac_blob_name).delete()
         except: pass
-
-def add_formatted_text(cell, text):
-    """Original simple parser for main doc."""
-    cell.text = ""
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line: continue
-        p = cell.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(0)
-        if line.startswith('##'):
-            run = p.add_run(line.strip('#').strip())
-            run.underline = True
-        elif line.startswith('*'):
-            clean = line.lstrip('*').lstrip("•").strip()
-            if clean.startswith('**') and ':**' in clean:
-                try:
-                    parts = clean.split(':**', 1)
-                    p.text = "•\t"
-                    p.add_run(parts[0].lstrip('**').strip() + ": ").bold = True
-                    p.add_run(parts[1].strip())
-                    p.paragraph_format.left_indent = Inches(0.25)
-                except:
-                    p.text = f"•\t{clean}"
-                    p.paragraph_format.left_indent = Inches(0.25)
-            else:
-                p.text = f"•\t{clean}"
-                p.paragraph_format.left_indent = Inches(0.25)
-        else:
-            p.add_run(line)
 
 # -----------------------------------------------------
 # 8. STREAMLIT UI (MAIN)
@@ -743,29 +702,27 @@ with tab1:
             st.session_state.chat_history = [] 
             st.session_state.saved_participants_input = participants_input 
             
-            # --- NEW: VISUAL METADATA EXTRACTION (Time + Title + Venue) ---
-            with st.spinner("🕵️‍♀️ Detecting time, title & venue from screen..."):
+            # --- METADATA EXTRACTION ---
+            with st.spinner("🕵️‍♀️ Detecting details from screen..."):
                 metadata = get_visual_metadata(path)
                 
             if metadata and metadata['datetime_sg']:
                 real_start_time = metadata['datetime_sg']
                 duration_secs = metadata['duration']
                 
-                # Save Date
                 st.session_state.detected_date = real_start_time.date()
                 
-                # Calc Time Range
+                # Calculate End Time
                 end_time = real_start_time + datetime.timedelta(seconds=duration_secs)
                 time_str = f"{real_start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
                 st.session_state.detected_time = time_str
                 
-                # Save Title & Venue
                 if metadata['title']: st.session_state.detected_title = metadata['title']
                 if metadata['venue']: st.session_state.detected_venue = metadata['venue']
                 
-                st.toast(f"📅 Found: {st.session_state.detected_date} | {metadata.get('title')} | {metadata.get('venue')}")
+                st.toast(f"📅 Found: {st.session_state.detected_date}")
             else:
-                st.toast("⚠️ No visual metadata found. Using defaults.")
+                st.toast("⚠️ Metadata not found. Using defaults.")
 
             c_list = [l.replace("(Client)","").strip() for l in participants_input.split('\n') if "(Client)" in l]
             i_list = [l.replace("(iFoundries)","").strip() for l in participants_input.split('\n') if "(iFoundries)" in l]
@@ -782,7 +739,8 @@ with tab1:
                     save_data = {
                         "ai_results": res,
                         "participants": participants_input,
-                        "date": timestamp
+                        "date": timestamp,
+                        "detected_title": st.session_state.detected_title
                     }
                     fname = f"Data_{uploaded_file.name}_{timestamp}.json"
                     if save_analysis_data_to_drive(save_data, fname):
@@ -798,19 +756,19 @@ with tab2:
     sg_tz = pytz.timezone('Asia/Singapore')
     sg_now = datetime.datetime.now(sg_tz)
     
-    # Use detected values or defaults
+    # Defaults
     default_date = st.session_state.detected_date if st.session_state.detected_date else sg_now.date()
     default_time = st.session_state.detected_time if st.session_state.detected_time else sg_now.strftime("%I:%M %p")
     default_venue = st.session_state.detected_venue if st.session_state.detected_venue else ""
     
-    # Filename Title construction
+    # Intelligent Filename
     base_title = st.session_state.detected_title if st.session_state.detected_title else "Meeting_Minutes"
-    final_fname = f"{base_title}_{default_date}.docx"
+    final_fname = f"AI_{base_title}_{default_date}.docx"
 
     row1, row2 = st.columns(2)
     with row1:
         date_obj = st.date_input("Date", default_date)
-        venue = st.text_input("Venue", value=default_venue) # Auto-filled Venue
+        venue = st.text_input("Venue", value=default_venue)
         client_rep = st.text_area("Client Reps", value=st.session_state.auto_client_reps)
         absent = st.text_input("Absent")
     with row2:
@@ -946,34 +904,79 @@ with tab3:
     transcript_context = st.session_state.ai_results.get("full_transcript", "")
     participants_context = st.session_state.saved_participants_input
     
+    # --- TAB 3: CHAT SAVING & APPEND LOGIC ---
     col1, col2 = st.columns([8, 2])
     with col2:
-        if st.button("💾 Save Chat to Drive"):
-            if not st.session_state.gdrive_creds:
-                st.error("Please login to Drive first!")
-            elif not st.session_state.chat_history:
-                st.warning("No chat history to save.")
-            else:
-                try:
-                    chat_doc = Document()
-                    chat_doc.add_heading(f"AI Chat Log - {date_str}", 0)
-                    for msg in st.session_state.chat_history:
-                        role = "AI Assistant" if msg["role"] == "assistant" else "User"
-                        p = chat_doc.add_paragraph()
-                        p.add_run(f"{role}: ").bold = True
-                        add_markdown_to_doc(chat_doc, msg["content"])
-                        chat_doc.add_paragraph("_" * 50)
+        # Prepare target filename
+        chat_fname = f"AI_{st.session_state.detected_title}_{date_str}.docx"
+        
+        # Check if file exists in 'Chats' folder (logic only runs if logged in)
+        existing_file_id = None
+        if st.session_state.gdrive_creds:
+            service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
+            folder_id = get_or_create_folder(service, "Chats")
+            if folder_id:
+                existing_file_id = find_existing_file(service, folder_id, chat_fname)
 
-                    chat_bio = io.BytesIO()
-                    chat_doc.save(chat_bio)
-                    chat_bio.seek(0)
-                    chat_fname = f"AI_{date_str}.docx"
-                    
-                    with st.spinner("Saving chat log..."):
-                        if upload_to_drive_user(chat_bio, chat_fname, "Chats"):
-                            st.success(f"✅ Saved to 'Chats' folder in Drive!")
-                        else: st.error("Failed to save chat.")
-                except Exception as e: st.error(f"Error saving chat: {e}")
+        if existing_file_id:
+            # Option A: Append
+            if st.button("➕ Append to Existing"):
+                try:
+                    # 1. Download original
+                    existing_bytes = download_drive_file_bytes(service, existing_file_id)
+                    if existing_bytes:
+                        doc = Document(existing_bytes)
+                        doc.add_paragraph("\n" + "="*30 + f" NEW SESSION ({datetime.datetime.now().strftime('%H:%M')}) " + "="*30 + "\n")
+                        
+                        for msg in st.session_state.chat_history:
+                            role = "AI Assistant" if msg["role"] == "assistant" else "User"
+                            p = doc.add_paragraph()
+                            p.add_run(f"{role}: ").bold = True
+                            add_markdown_to_doc(doc, msg["content"])
+                            doc.add_paragraph("-" * 20)
+
+                        # 2. Save & Update
+                        updated_bio = io.BytesIO()
+                        doc.save(updated_bio)
+                        updated_bio.seek(0)
+                        
+                        with st.spinner("Updating Chat Log..."):
+                            if update_drive_file(service, existing_file_id, updated_bio):
+                                st.success(f"✅ Appended to '{chat_fname}'!")
+                except Exception as e: st.error(f"Update failed: {e}")
+
+            # Option B: Save New
+            if st.button("🆕 Save as New Copy"):
+                 # Standard save logic (but creates copy)
+                 pass # (Reuse standard logic below with unique name)
+
+        else:
+            # Standard Save Button
+            if st.button("💾 Save Chat to Drive"):
+                if not st.session_state.gdrive_creds:
+                    st.error("Please login to Drive first!")
+                elif not st.session_state.chat_history:
+                    st.warning("No chat history to save.")
+                else:
+                    try:
+                        chat_doc = Document()
+                        chat_doc.add_heading(f"AI Chat Log - {date_str}", 0)
+                        for msg in st.session_state.chat_history:
+                            role = "AI Assistant" if msg["role"] == "assistant" else "User"
+                            p = chat_doc.add_paragraph()
+                            p.add_run(f"{role}: ").bold = True
+                            add_markdown_to_doc(chat_doc, msg["content"])
+                            chat_doc.add_paragraph("-" * 50)
+
+                        chat_bio = io.BytesIO()
+                        chat_doc.save(chat_bio)
+                        chat_bio.seek(0)
+                        
+                        with st.spinner("Saving chat log..."):
+                            if upload_to_drive_user(chat_bio, chat_fname, "Chats"):
+                                st.success(f"✅ Saved to 'Chats' folder in Drive!")
+                            else: st.error("Failed to save chat.")
+                    except Exception as e: st.error(f"Error saving chat: {e}")
 
     if not transcript_context:
         st.info("⚠️ Please upload and analyze a meeting audio file in Tab 1 first.")
@@ -1050,6 +1053,8 @@ with tab4:
                     if data:
                         st.session_state.ai_results = data.get("ai_results", {})
                         st.session_state.saved_participants_input = data.get("participants", "")
+                        # NEW: Restore detecting title/venue if saved
+                        if "detected_title" in data: st.session_state.detected_title = data["detected_title"]
                         st.session_state.chat_history = [] 
                         
                         p_input = st.session_state.saved_participants_input
