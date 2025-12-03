@@ -439,15 +439,45 @@ if 'gdrive_creds_json' in st.session_state and not st.session_state.gdrive_creds
     except: st.session_state.gdrive_creds_json = None
 
 # Basecamp Auto-Login
+# --- AUTO-LOGIN HANDLER (BASECAMP) ---
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
+    auth_code = st.query_params["code"]
     try:
-        resp = requests.post(BASECAMP_TOKEN_URL, data={"type":"web_server","client_id":BASECAMP_CLIENT_ID,"client_secret":BASECAMP_CLIENT_SECRET,"redirect_uri":BASECAMP_REDIRECT_URI,"code":st.query_params["code"]})
-        resp.raise_for_status()
-        st.session_state.basecamp_token = resp.json()
-        st.session_state.user_real_name = fetch_basecamp_name(resp.json())
-        st.query_params.clear()
-        st.rerun()
-    except: st.error("Login failed.")
+        payload = {
+            "type": "web_server",
+            "client_id": BASECAMP_CLIENT_ID,
+            "client_secret": BASECAMP_CLIENT_SECRET,
+            "redirect_uri": BASECAMP_REDIRECT_URI,
+            "code": auth_code
+        }
+        
+        # 1. Attempt Token Exchange
+        response = requests.post(BASECAMP_TOKEN_URL, data=payload)
+        
+        # 2. Check for errors specifically
+        if response.status_code != 200:
+            st.error(f"Basecamp Login Error ({response.status_code}): {response.text}")
+        else:
+            token = response.json()
+            
+            # 3. Save Session
+            st.session_state.basecamp_token = token
+            
+            # 4. Fetch User Name
+            real_name = fetch_basecamp_name(token)
+            if real_name:
+                st.session_state.user_real_name = real_name
+            
+            # 5. Success & Cleanup
+            st.toast("✅ Basecamp Login Successful!", icon="🎉")
+            
+            # Clear the code from URL to prevent re-submission error on reload
+            st.query_params.clear()
+            time.sleep(1)
+            st.rerun()
+            
+    except Exception as e:
+        st.error(f"Auto-login system error: {e}")
 
 # -----------------------------------------------------
 # 4. SIDEBAR
