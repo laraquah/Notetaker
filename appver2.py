@@ -2,6 +2,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os
 import shutil
+
+# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
 import tempfile
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -13,11 +17,6 @@ import json
 import datetime
 import pytz
 import re
-import requests
-from requests_oauthlib import OAuth2Session
-
-# --- FIX: ALLOW OAUTH TO RUN ON STREAMLIT CLOUD ---
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # Import Google Cloud Libraries
 from google.cloud import speech
@@ -30,6 +29,10 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2 import service_account
+
+# --- Import Basecamp & formatting tools ---
+import requests
+from requests_oauthlib import OAuth2Session
 
 # -----------------------------------------------------
 # 1. CONSTANTS & CONFIGURATION
@@ -66,33 +69,173 @@ BASECAMP_TOKEN_URL = "https://launchpad.37signals.com/authorization/token"
 BASECAMP_API_BASE = f"https://3.basecampapi.com/{BASECAMP_ACCOUNT_ID}"
 BASECAMP_USER_AGENT = {"User-Agent": "AI Meeting Notes App (external-user)"}
 
-# --- API CLIENTS SETUP ---
-try:
-    sa_creds = service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)
-    storage_client = storage.Client(credentials=sa_creds)
-    speech_client = speech.SpeechClient(credentials=sa_creds)
-    
-    genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
-except Exception as e:
-    st.error(f"System Error (AI Services): {e}")
-    st.stop()
-
-# =====================================================
-# 2. HELPER FUNCTIONS
-# =====================================================
+# -----------------------------------------------------
+# 2. HELPER FUNCTIONS (Updated for Style Safety)
+# -----------------------------------------------------
 
 def fetch_basecamp_name(token_dict):
+    """Calls Basecamp Identity API to get the user's real name."""
     try:
         identity_url = "https://launchpad.37signals.com/authorization.json"
-        headers = {"Authorization": f"Bearer {token_dict['access_token']}", "User-Agent": "AI Meeting Notes App"}
+        headers = {
+            "Authorization": f"Bearer {token_dict['access_token']}",
+            "User-Agent": "AI Meeting Notes App"
+        }
         response = requests.get(identity_url, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            return f"{data.get('identity', {}).get('first_name', '')} {data.get('identity', {}).get('last_name', '')}".strip()
-    except: return ""
+            first = data.get('identity', {}).get('first_name', '')
+            last = data.get('identity', {}).get('last_name', '')
+            return f"{first} {last}".strip()
+    except Exception:
+        return ""
     return ""
 
+def safe_apply_style(paragraph, style_name, fallback_text_prefix=""):
+    """
+    Tries to apply a style. If the style doesn't exist in the doc,
+    it falls back to Normal text and optionally prepends a prefix (like a bullet).
+    """
+    try:
+        paragraph.style = style_name
+    except KeyError:
+        # Style missing in template. Use fallback manual formatting.
+        if fallback_text_prefix:
+            paragraph.text = fallback_text_prefix + paragraph.text
+        # Note: We leave it as 'Normal' style by default if style fails
+
+def _add_rich_text(paragraph, text):
+    """Parses markdown-style **bold** text and applies Word formatting."""
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            clean_text = part[2:-2]
+            run = paragraph.add_run(clean_text)
+            run.bold = True
+        else:
+            paragraph.add_run(part)
+
+def add_formatted_text(cell, text):
+    """Enhanced parser to handle bullets and bold text correctly in Word table cells."""
+    cell.text = ""
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        
+        p = cell.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(2)
+        
+        if line.startswith('##'):
+            clean_title = line.lstrip('#').strip()
+            run = p.add_run(clean_title)
+            run.underline = True
+            run.bold = True
+            p.paragraph_format.space_before = Pt(8)
+        elif line.startswith('*') or line.startswith('-'):
+            clean_text = line.lstrip('*- ').strip()
+            # Try applying bullet style safely
+            try:
+                p.style = 'List Bullet'
+            except KeyError:
+                # Fallback if template lacks List Bullet
+                p.text = "• " 
+            
+            _add_rich_text(p, clean_text)
+        else:
+            _add_rich_text(p, line)
+
+def add_markdown_to_doc(doc, text):
+    """Parses markdown text (bold, bullets, tables) into Word elements."""
+    lines = text.split('\n')
+    table_row_pattern = re.compile(r"^\|(.+)\|")
+    table_sep_pattern = re.compile(r"^\|[-:| ]+\|")
+    table_data = []
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+        if table_row_pattern.match(stripped):
+            if not table_sep_pattern.match(stripped):
+                cells = [c.strip() for c in stripped.strip('|').split('|')]
+                table_data.append(cells)
+            in_table = True
+            continue
+        elif in_table and not table_row_pattern.match(stripped) and stripped == "":
+            if table_data:
+                _render_word_table(doc, table_data)
+                table_data = []
+            in_table = False
+            continue
+        elif in_table:
+             if table_data:
+                _render_word_table(doc, table_data)
+                table_data = []
+             in_table = False
+
+        if stripped.startswith('##'):
+            p = doc.add_heading(stripped.lstrip('#').strip(), level=2)
+        elif stripped.startswith('*') or stripped.startswith('-'):
+            clean_text = stripped.lstrip('*- ').strip()
+            p = doc.add_paragraph()
+            safe_apply_style(p, 'List Bullet', "• ")
+            _add_rich_text(p, clean_text)
+        elif stripped:
+            p = doc.add_paragraph()
+            _add_rich_text(p, stripped)
+
+    if table_data:
+        _render_word_table(doc, table_data)
+
+def _render_word_table(doc, rows):
+    if not rows: return
+    num_cols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+    table.style = 'Table Grid'
+    for i, row_data in enumerate(rows):
+        row_cells = table.rows[i].cells
+        for j, text in enumerate(row_data):
+            if j < len(row_cells):
+                p = row_cells[j].paragraphs[0]
+                _add_rich_text(p, text)
+                if i == 0: 
+                    for run in p.runs: run.bold = True
+    doc.add_paragraph("")
+
+# --- VISUAL METADATA ---
+def get_visual_metadata(file_path):
+    if shutil.which("ffmpeg") is None: return None
+    thumbnail_path = "temp_thumb.jpg"
+    result_data = {"datetime_sg": None, "duration": 0, "title": "Meeting_Minutes", "venue": ""}
+    try:
+        # Duration
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0: result_data["duration"] = float(res.stdout.strip())
+
+        # Vision
+        subprocess.run(['ffmpeg', '-i', file_path, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', thumbnail_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if os.path.exists(thumbnail_path):
+            vision = genai.GenerativeModel('gemini-2.5-flash-lite')
+            with open(thumbnail_path, "rb") as img: img_data = img.read()
+            prompt = """Analyze this meeting screenshot. Return JSON: { "datetime": "YYYY-MM-DD HH:MM", "title": "Center Text", "venue": "Corner Text" }. If not found, use "None"."""
+            resp = vision.generate_content([{'mime_type': 'image/jpeg', 'data': img_data}, prompt])
+            try:
+                data = json.loads(resp.text.strip().replace("```json", "").replace("```", ""))
+                if data.get("title") != "None": result_data["title"] = data["title"].replace(" ", "_")
+                if data.get("venue") != "None": result_data["venue"] = data["venue"]
+                if data.get("datetime") != "None":
+                    dt = datetime.datetime.strptime(data["datetime"], "%Y-%m-%d %H:%M").replace(tzinfo=datetime.timezone.utc)
+                    result_data["datetime_sg"] = dt.astimezone(pytz.timezone('Asia/Singapore'))
+            except: pass
+    except: pass
+    finally:
+        if os.path.exists(thumbnail_path): os.remove(thumbnail_path)
+    return result_data
+
+# --- CLOUD HELPERS ---
 def get_basecamp_session_user():
     if not st.session_state.basecamp_token: return None
     session = OAuth2Session(BASECAMP_CLIENT_ID, token=st.session_state.basecamp_token)
@@ -101,7 +244,7 @@ def get_basecamp_session_user():
 
 def upload_to_gcs(file_path, destination_blob_name):
     try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        bucket = storage.Client(credentials=service_account.Credentials.from_service_account_info(GCP_SERVICE_ACCOUNT_JSON)).bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(destination_blob_name)
         blob.upload_from_filename(file_path, timeout=3600)
         return f"gs://{GCS_BUCKET_NAME}/{destination_blob_name}"
@@ -109,69 +252,56 @@ def upload_to_gcs(file_path, destination_blob_name):
         st.error(f"GCS Upload Error: {e}")
         return None
 
-def get_or_create_folder(service, folder_name):
+def get_or_create_folder(service, name):
     try:
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-        results = service.files().list(q=query, fields="files(id)").execute()
-        items = results.get('files', [])
+        q = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and trashed=false"
+        res = service.files().list(q=q, fields="files(id)").execute()
+        items = res.get('files', [])
         if items: return items[0]['id']
         else:
-            file_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
-            folder = service.files().create(body=file_metadata, fields='id').execute()
-            return folder.get('id')
-    except Exception as e: return None
+            meta = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
+            return service.files().create(body=meta, fields='id').execute().get('id')
+    except: return None
 
-def upload_to_drive_user(file_stream, file_name, target_folder_name):
+def upload_to_drive_user(file, name, folder):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        folder_id = get_or_create_folder(service, target_folder_name)
-        parents = [folder_id] if folder_id else []
+        fid = get_or_create_folder(service, folder)
+        meta = {"name": name, "parents": [fid] if fid else []}
+        media = MediaIoBaseUpload(file, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        return service.files().create(body=meta, media_body=media, fields="id").execute().get("id")
+    except: return None
 
-        file_metadata = {"name": file_name, "parents": parents}
-        media = MediaIoBaseUpload(file_stream, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        return file.get("id")
-    except Exception as e:
-        st.error(f"Google Drive Upload Error: {e}")
-        return None
-
-def save_analysis_data_to_drive(data_dict, filename):
+def save_analysis_data_to_drive(data, filename):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        folder_id = get_or_create_folder(service, "Meeting_Data")
-        if not folder_id: return None
-
-        json_str = json.dumps(data_dict, indent=2)
-        fh = io.BytesIO(json_str.encode('utf-8'))
-        file_metadata = {"name": filename, "parents": [folder_id]}
+        fid = get_or_create_folder(service, "Meeting_Data")
+        fh = io.BytesIO(json.dumps(data, indent=2).encode('utf-8'))
+        meta = {"name": filename, "parents": [fid] if fid else []}
         media = MediaIoBaseUpload(fh, mimetype='application/json')
-        service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        return True
-    except: return False
+        return service.files().create(body=meta, media_body=media, fields="id").execute().get("id")
+    except: return None
 
 def list_past_meetings():
     if not st.session_state.gdrive_creds: return []
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        folder_id = get_or_create_folder(service, "Meeting_Data")
-        if not folder_id: return []
-        query = f"'{folder_id}' in parents and mimeType='application/json' and trashed=false"
-        results = service.files().list(q=query, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
-        return results.get('files', [])
+        fid = get_or_create_folder(service, "Meeting_Data")
+        if not fid: return []
+        q = f"'{fid}' in parents and mimeType='application/json' and trashed=false"
+        return service.files().list(q=q, fields="files(id, name)", orderBy="createdTime desc").execute().get('files', [])
     except: return []
 
 def load_meeting_data(file_id):
     if not st.session_state.gdrive_creds: return None
     try:
         service = build("drive", "v3", credentials=st.session_state.gdrive_creds)
-        request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
+        downloader = MediaIoBaseDownload(fh, service.files().get_media(fileId=file_id))
         done = False
-        while done is False:
-            status, done = downloader.next_chunk()
+        while not done: _, done = downloader.next_chunk()
         fh.seek(0)
         return json.load(fh)
     except: return None
@@ -230,35 +360,6 @@ def post_to_basecamp(_session, project_id, tool_type, tool_id, sub_id, title, co
         return False
 
 # --- AI Analysis ---
-def get_visual_metadata(file_path):
-    if shutil.which("ffmpeg") is None: return None
-    thumbnail_path = "temp_thumb.jpg"
-    result_data = {"datetime_sg": None, "duration": 0, "title": "Meeting_Minutes", "venue": ""}
-    try:
-        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0: result_data["duration"] = float(res.stdout.strip())
-
-        subprocess.run(['ffmpeg', '-i', file_path, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', thumbnail_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if os.path.exists(thumbnail_path):
-            vision_model = genai.GenerativeModel('gemini-2.5-flash-lite')
-            with open(thumbnail_path, "rb") as img: img_data = img.read()
-            prompt = """Analyze this meeting screenshot. Return JSON: { "datetime": "YYYY-MM-DD HH:MM", "title": "Center Text", "venue": "Corner Text" }. If not found, use "None"."""
-            resp = vision_model.generate_content([{'mime_type': 'image/jpeg', 'data': img_data}, prompt])
-            try:
-                data = json.loads(resp.text.strip().replace("```json", "").replace("```", ""))
-                if data.get("title") != "None": result_data["title"] = data["title"].replace(" ", "_")
-                if data.get("venue") != "None": result_data["venue"] = data["venue"]
-                if data.get("datetime") != "None":
-                    dt = datetime.datetime.strptime(data["datetime"], "%Y-%m-%d %H:%M").replace(tzinfo=datetime.timezone.utc)
-                    result_data["datetime_sg"] = dt.astimezone(pytz.timezone('Asia/Singapore'))
-            except: pass
-    except: pass
-    finally:
-        if os.path.exists(thumbnail_path): os.remove(thumbnail_path)
-    return result_data
-
 def get_structured_notes_google(audio_file_path, file_name, participants_context):
     try:
         with st.spinner(f"Converting {file_name}..."):
@@ -296,21 +397,25 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript += w.word + " "
 
         with st.spinner("Analyzing with Gemini..."):
+            # --- UPDATED PROMPT FOR SPECIFIC NAMES & DETAILS ---
             prompt = f"""
             You are an expert meeting secretary. Context: {participants_context}
             Transcript: {full_transcript}
             
             TASKS:
-            1. Identify speakers.
+            1. Identify speakers by REAL NAME using the Context (e.g., "Zhe Tng", NOT "Speaker 1").
             2. Extract Sections:
                ## OVERVIEW ##
-               [Brief 2-3 sentence summary of who met and why.]
+               [Brief 2-3 sentence summary of who met and what was discussed.]
                
                ## DISCUSSION ##
                [Detailed bullet points with headers]
                
                ## NEXT STEPS ##
-               [Specific actions: * **Action:** [Task] (Assigned to: [Name]) - Deadline: [Time]]
+               List highly specific, actionable items. **DO NOT MISS ANY TASKS.**
+               FORMAT:
+               * **Action:** [Specific Task] (Assigned to: [Real Name]) - Deadline: [Time if mentioned]
+               * **Action:** [Another Task] (Assigned to: [Real Name]) - Deadline: [Time if mentioned]
                
                ## CLIENT REQUESTS ##
                [Bullet points]
@@ -334,84 +439,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
         try: bucket = storage_client.bucket(GCS_BUCKET_NAME); bucket.blob(f"{os.path.splitext(file_name)[0]}.flac").delete()
         except: pass
 
-# --- Markdown Parsers ---
-def _add_rich_text(paragraph, text):
-    parts = re.split(r'(\*\*.*?\*\*)', text)
-    for part in parts:
-        if part.startswith('**') and part.endswith('**'):
-            run = paragraph.add_run(part[2:-2])
-            run.bold = True
-        else:
-            paragraph.add_run(part)
-
-def add_formatted_text(cell, text):
-    cell.text = ""
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line: continue
-        p = cell.add_paragraph()
-        p.paragraph_format.space_after = Pt(2)
-        if line.startswith('##'):
-            run = p.add_run(line.lstrip('#').strip())
-            run.underline = True
-            run.bold = True
-            p.paragraph_format.space_before = Pt(8)
-        elif line.startswith('*') or line.startswith('-'):
-            clean = line.lstrip('*- ').strip()
-            p.style = 'List Bullet'
-            _add_rich_text(p, clean)
-        else:
-            _add_rich_text(p, line)
-
-def add_markdown_to_doc(doc, text):
-    lines = text.split('\n')
-    table_row = re.compile(r"^\|(.+)\|")
-    table_sep = re.compile(r"^\|[-:| ]+\|")
-    table_data = []
-    in_table = False
-
-    for line in lines:
-        stripped = line.strip()
-        if table_row.match(stripped):
-            if not table_sep.match(stripped):
-                table_data.append([c.strip() for c in stripped.strip('|').split('|')])
-            in_table = True
-            continue
-        elif in_table:
-            if table_data:
-                t = doc.add_table(rows=len(table_data), cols=max(len(r) for r in table_data))
-                t.style = 'Table Grid'
-                for i, row in enumerate(table_data):
-                    for j, val in enumerate(row):
-                        if j < len(t.rows[i].cells):
-                            p = t.rows[i].cells[j].paragraphs[0]
-                            _add_rich_text(p, val)
-                            if i == 0: 
-                                for run in p.runs: run.bold = True
-                doc.add_paragraph("")
-                table_data = []
-            in_table = False
-
-        if stripped.startswith('##'):
-            doc.add_heading(stripped.lstrip('#').strip(), level=2)
-        elif stripped.startswith('*') or stripped.startswith('-'):
-            p = doc.add_paragraph(style='List Bullet')
-            _add_rich_text(p, stripped.lstrip('*- ').strip())
-        elif stripped:
-            p = doc.add_paragraph()
-            _add_rich_text(p, stripped)
-    
-    if table_data: # Catch end of text table
-        t = doc.add_table(rows=len(table_data), cols=max(len(r) for r in table_data))
-        t.style = 'Table Grid'
-        for i, row in enumerate(table_data):
-            for j, val in enumerate(row):
-                if j < len(t.rows[i].cells):
-                    p = t.rows[i].cells[j].paragraphs[0]
-                    _add_rich_text(p, val)
-                    if i == 0: 
-                        for run in p.runs: run.bold = True
-
 # -----------------------------------------------------
 # 3. STATE & LOGIN
 # -----------------------------------------------------
@@ -422,6 +449,8 @@ if 'detected_date' not in st.session_state: st.session_state.detected_date = Non
 if 'detected_time' not in st.session_state: st.session_state.detected_time = None
 if 'detected_title' not in st.session_state: st.session_state.detected_title = "Meeting_Minutes"
 if 'detected_venue' not in st.session_state: st.session_state.detected_venue = ""
+if 'auto_client_reps' not in st.session_state: st.session_state.auto_client_reps = ""
+if 'auto_ifoundries_reps' not in st.session_state: st.session_state.auto_ifoundries_reps = ""
 
 # Re-hydrate Google
 if 'gdrive_creds_json' in st.session_state and not st.session_state.gdrive_creds:
@@ -461,8 +490,8 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.markdown("### Step 2: Google Drive")
-    if not st.session_state.basecamp_token: st.info("🔒 Login to Basecamp first.")
+    st.markdown("### Step 2: Drive")
+    if not st.session_state.basecamp_token: st.info("Login to Basecamp first.")
     else:
         if st.session_state.gdrive_creds:
             st.success("✅ Connected")
@@ -480,7 +509,7 @@ with st.sidebar:
                 st.rerun()
 
 if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
-    st.title("🔒 Access Restricted"); st.warning("Please log in to both services."); st.stop()
+    st.title("🔒 Access Restricted"); st.warning("Please login to both services."); st.stop()
 
 # -----------------------------------------------------
 # 8. MAIN UI
@@ -494,8 +523,9 @@ tab1, tab2, tab3, tab4 = st.tabs(["1. Analyze", "2. Review & Export", "3. Chat",
 
 with tab1:
     st.header("1. Analyze Audio")
-    participants = st.text_area("Known Participants", "Client (Client)\niFoundries (iFoundries)")
+    participants = st.text_area("Participants", "Client (Client)\niFoundries (iFoundries)")
     up = st.file_uploader("Upload", type=['mp3','mp4','m4a','wav'])
+    
     if st.button("Analyze"):
         if up:
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{up.name.split('.')[-1]}") as tmp:
@@ -504,6 +534,12 @@ with tab1:
             st.session_state.chat_history = []
             st.session_state.saved_participants_input = participants
             
+            # Parse Reps
+            cl = [l.replace("(Client)","").strip() for l in participants.split('\n') if "(Client)" in l]
+            il = [l.replace("(iFoundries)","").strip() for l in participants.split('\n') if "(iFoundries)" in l]
+            st.session_state.auto_client_reps = "\n".join(cl)
+            st.session_state.auto_ifoundries_reps = ", ".join(il)
+
             # Metadata
             with st.spinner("Extracting Metadata..."):
                 meta = get_visual_metadata(path)
@@ -519,23 +555,29 @@ with tab1:
             if "error" in res: st.error(res["error"])
             else:
                 st.session_state.ai_results = res
-                save_analysis_data_to_drive({"res": res, "parts": participants, "chat": [], "title": st.session_state.detected_title}, f"Data_{up.name}_{datetime.datetime.now().strftime('%Y%m%d')}.json")
+                # Auto-Save
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                save_data = {"ai_results": res, "participants": participants, "date": ts, "detected_title": st.session_state.detected_title}
+                save_analysis_data_to_drive(save_data, f"Data_{up.name}_{ts}.json")
                 st.success("Done! Check Review tab.")
 
 with tab2:
     st.header("2. Review")
+    # Defaults
     d_date = st.session_state.detected_date if st.session_state.detected_date else datetime.date.today()
     d_time = st.session_state.detected_time if st.session_state.detected_time else datetime.datetime.now().strftime("%I:%M %p")
     
     c1, c2 = st.columns(2)
     date = c1.date_input("Date", d_date)
     venue = c1.text_input("Venue", st.session_state.detected_venue)
-    crep = c1.text_input("Client Reps")
+    crep = c1.text_input("Client Reps", st.session_state.auto_client_reps)
     absent = c1.text_input("Absent")
     
     time_str = c2.text_input("Time", d_time)
-    prep = c2.text_input("Prepared By", st.session_state.user_real_name)
-    irep = c2.text_input("iFoundries Reps")
+    # Prep by logic: default to logged in user, fallback to ifoundries reps
+    def_prep = st.session_state.user_real_name if st.session_state.user_real_name else st.session_state.auto_ifoundries_reps
+    prep = c2.text_input("Prepared By", def_prep)
+    irep = c2.text_input("iFoundries Reps", st.session_state.auto_ifoundries_reps)
     
     st.subheader("Content")
     overview = st.text_area("Overview (Green Box)", st.session_state.ai_results.get("overview", ""))
@@ -543,8 +585,10 @@ with tab2:
     next_s = st.text_area("Next Steps", st.session_state.ai_results.get("next_steps", ""), height=200)
     
     st.divider()
-    do_d = st.checkbox("Upload to Drive", True)
-    do_b = st.checkbox("Upload to Basecamp", False)
+    do_d = st.checkbox("Drive", True)
+    do_b = st.checkbox("Basecamp")
+    
+    pid, tool, tid, subid, btitle, bdesc = None, None, None, None, "", ""
     
     if do_b:
         sess = get_basecamp_session_user()
@@ -552,22 +596,27 @@ with tab2:
         pname = st.selectbox("Project", [p[0] for p in projs])
         if pname:
             pid = next(p[1] for p in projs if p[0]==pname)
-            tool = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs & Files"])
+            tool = st.selectbox("Tool", ["To-dos", "Message Board", "Docs"])
             dock = get_project_tools(sess, pid)
             
             if tool == "To-dos":
                 tid = next((t['id'] for t in dock if t['name']=='todoset'), None)
                 lists = get_todolists(sess, tid, pid)
                 lname = st.selectbox("List", [l[0] for l in lists])
-                if lname: subid = next(l[1] for l in lists if l[0]==lname)
-                btitle = st.text_input("Title", f"Minutes - {date}")
-                bbody = st.text_area("Description", "Attached.")
-    
-    if st.button("Generate Word Doc"):
+                if lname: subid = next(l[1] for l in lists if l[0]==lname); btitle = st.text_input("Title", f"Minutes - {date}")
+            elif tool == "Message Board":
+                tid = next((t['id'] for t in dock if t['name']=='message_board'), None)
+                btitle = st.text_input("Subject", f"Minutes - {date}")
+            elif tool == "Docs":
+                tid = next((t['id'] for t in dock if t['name']=='vault'), None)
+                btitle = st.text_input("File Name", f"Minutes_{date}.docx")
+
+    if st.button("Generate"):
         doc = Document("Minutes Of Meeting - Template.docx")
-        # 1. Header
+        
+        # 1. Title Replace
         for p in doc.paragraphs: 
-            if "[Title]" in p.text: p.text = p.text.replace("[Title]", st.session_state.detected_title)
+            if "[Title]" in p.text: p.text = p.text.replace("[Title]", st.session_state.detected_title.replace("_"," "))
         
         t = doc.tables[0]
         t.cell(1,1).text = str(date)
@@ -577,13 +626,13 @@ with tab2:
         t.cell(4,2).text = irep
         t.cell(5,1).text = absent
         
-        # 2. Content
+        # 2. Content Table
         t2 = doc.tables[1]
-        t2.cell(1,1).text = overview # Green Box
+        t2.cell(1,1).text = overview # Overview in Green Box
         add_formatted_text(t2.cell(2,1), disc)
         add_formatted_text(t2.cell(4,1), next_s)
         
-        # 3. Adjourned
+        # 3. Adjourned Time
         try: end_t = time_str.split('-')[1].strip()
         except: end_t = "Unknown"
         t2.cell(5,1).text = f"Meeting adjourned at {end_t}"
@@ -596,64 +645,71 @@ with tab2:
         if do_d: upload_to_drive_user(b, fn, "Meeting Notes")
         if do_b and pid:
             sgid = upload_bc_attachment(sess, b.getvalue(), fn)
-            post_to_basecamp(sess, pid, tool, tid, subid, btitle, bbody, sgid)
-        
+            post_to_basecamp(sess, pid, tool, tid, subid, btitle, "Attached.", sgid)
+            
         st.success("Done!")
         st.download_button("Download", b, fn)
 
 with tab3:
-    st.header("💬 Chat")
-    # Chat Save Button
+    st.header("Chat")
+    
     if st.button("💾 Save Chat to Drive"):
         d = Document()
         d.add_heading(f"Chat Log - {datetime.date.today()}", 0)
         for m in st.session_state.chat_history:
             p = d.add_paragraph()
-            role = "AI" if m['role']=='assistant' else "User"
+            role = "AI" if m['role'] == 'assistant' else "User"
             p.add_run(f"{role}: ").bold = True
-            add_markdown_to_doc(d, m['content'])
+            add_markdown_to_doc(d, m['content']) # Smart Markdown Parsing
             d.add_paragraph("_"*30)
+        
         b = io.BytesIO(); d.save(b); b.seek(0)
         upload_to_drive_user(b, f"Chat_{st.session_state.detected_title}.docx", "Chats")
         st.success("Saved!")
 
-    # Chat Box
-    box = st.container(height=500)
-    with box:
-        for m in st.session_state.chat_history:
-            st.chat_message(m["role"], avatar="👤" if m["role"]=="user" else "🤖").markdown(m["content"])
-    
-    if p := st.chat_input("Ask a question..."):
-        st.session_state.chat_history.append({"role":"user", "content":p})
-        box.chat_message("user", avatar="👤").markdown(p)
+    # Chat Loop
+    for m in st.session_state.chat_history:
+        st.chat_message(m["role"]).markdown(m["content"])
         
-        with box.chat_message("assistant", avatar="🤖"):
-            with st.spinner("Thinking..."):
+    if p := st.chat_input():
+        st.session_state.chat_history.append({"role":"user", "content":p})
+        st.chat_message("user").markdown(p)
+        
+        with st.chat_message("assistant"):
+            def str_gen():
                 prompt = f"""
-                Role: Secretary.
                 Context: {st.session_state.saved_participants_input}
                 Transcript: {st.session_state.ai_results.get('full_transcript','')}
                 Question: {p}
                 Rules: Professional voice. Use real names. Concise.
                 """
-                resp = gemini_model.generate_content(prompt).text
-                st.markdown(resp)
-                st.session_state.chat_history.append({"role":"assistant", "content":resp})
+                for chunk in gemini_model.generate_content(prompt, stream=True):
+                    if chunk.text: yield chunk.text
+            
+            full_resp = st.write_stream(str_gen())
+            st.session_state.chat_history.append({"role":"assistant", "content":full_resp})
 
 with tab4:
-    st.header("📂 History")
+    st.header("History")
     if st.button("Refresh"): st.rerun()
+    
     files = list_past_meetings()
     if files:
         sel = st.selectbox("Select Meeting", [f['name'] for f in files])
         if st.button("Load"):
             fid = next(f['id'] for f in files if f['name'] == sel)
-            d = load_meeting_data(fid)
-            if d:
-                st.session_state.ai_results = d.get("res", {})
-                st.session_state.saved_participants_input = d.get("parts", "")
-                st.session_state.chat_history = d.get("chat", [])
-                st.session_state.detected_title = d.get("title", "Meeting")
-                st.success("Loaded!")
-                time.sleep(1)
-                st.rerun()
+            data = load_meeting_data(fid)
+            if data:
+                st.session_state.ai_results = data.get("ai_results", {})
+                st.session_state.saved_participants_input = data.get("participants", "")
+                st.session_state.chat_history = data.get("chat_history", []) # RESTORE CHAT!
+                st.session_state.detected_title = data.get("detected_title", "Meeting")
+                
+                p_input = st.session_state.saved_participants_input
+                c_list = [l.replace("(Client)","").strip() for l in p_input.split('\n') if "(Client)" in l]
+                i_list = [l.replace("(iFoundries)","").strip() for l in p_input.split('\n') if "(iFoundries)" in l]
+                st.session_state.auto_client_reps = "\n".join(c_list)
+                st.session_state.auto_ifoundries_reps = ", ".join(i_list)
+                
+                st.success("Loaded! Check Tab 2 and 3.")
+                time.sleep(1); st.rerun()
