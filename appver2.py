@@ -235,12 +235,10 @@ def get_visual_metadata(file_path):
     thumbnail_path = "temp_thumb.jpg"
     result_data = {"datetime_sg": None, "duration": 0, "title": "Meeting_Minutes", "venue": ""}
     try:
-        # Duration
         cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0: result_data["duration"] = float(res.stdout.strip())
 
-        # Vision
         subprocess.run(['ffmpeg', '-i', file_path, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', thumbnail_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if os.path.exists(thumbnail_path):
@@ -298,38 +296,45 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript += w.word + " "
 
         with st.spinner("Analyzing with Gemini..."):
-            # --- UPDATED PROMPT: MERGE REQUESTS INTO NEXT STEPS ---
+            # --- ROBUST PROMPT TO FORCE CONTENT INTO FIELDS ---
             prompt = f"""
             You are an expert meeting secretary. Context: {participants_context}
             Transcript: {full_transcript}
             
             TASKS:
             1. Identify speakers using context.
-            2. Extract Sections:
-               ## OVERVIEW ##
-               [Brief summary of WHO met and WHAT was discussed (2-3 sentences).]
-               
-               ## DISCUSSION ##
-               [Detailed bullet points with headers]
-               
-               ## NEXT STEPS ##
-               List ALL specific, actionable items. **CRITICAL: Take any specific requests made by the Client and convert them into Action Items here.**
-               FORMAT:
-               * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
-               
-               ## CLIENT REQUESTS ##
-               [Leave this section empty if you moved everything to Next Steps, otherwise list pending questions]
+            2. Extract Sections using these EXACT headers:
+            
+            ## OVERVIEW ##
+            [2-3 sentences summarizing WHO met and WHAT was the main purpose/outcome.]
+            
+            ## DISCUSSION ##
+            [Detailed bullet points with headers. Be comprehensive.]
+            
+            ## NEXT STEPS ##
+            List specific actionable items. **IMPORTANT: Merge any Client Requests into this list as actions for the appropriate person.**
+            FORMAT:
+            * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
             """
             text = gemini_model.generate_content(prompt).text
             
+            # --- ROBUST REGEX PARSER (FIXES EMPTY FIELDS) ---
             overview = ""
             discussion = ""
             next_steps = ""
             
             try:
-                if "## OVERVIEW ##" in text: overview = text.split("## OVERVIEW ##")[1].split("## DISCUSSION ##")[0].strip()
-                if "## DISCUSSION ##" in text: discussion = text.split("## DISCUSSION ##")[1].split("## NEXT STEPS ##")[0].strip()
-                if "## NEXT STEPS ##" in text: next_steps = text.split("## NEXT STEPS ##")[1].strip()
+                # Use Regex to capture content between headers, ignoring casing/spacing
+                ov_match = re.search(r'##\s*OVERVIEW\s*##(.*?)(?=##\s*DISCUSSION|##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
+                disc_match = re.search(r'##\s*DISCUSSION\s*##(.*?)(?=##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
+                ns_match = re.search(r'##\s*NEXT STEPS\s*##(.*)', text, re.DOTALL | re.IGNORECASE)
+                
+                if ov_match: overview = ov_match.group(1).strip()
+                if disc_match: discussion = disc_match.group(1).strip()
+                if ns_match: next_steps = ns_match.group(1).strip()
+
+                # Safety Fallback
+                if not overview and not discussion: discussion = text
             except: discussion = text
 
             return {"overview": overview, "discussion": discussion, "next_steps": next_steps, "full_transcript": full_transcript}
@@ -349,11 +354,9 @@ def _add_rich_text(paragraph, text):
             paragraph.add_run(part)
 
 def safe_apply_style(paragraph, style_name, fallback_prefix=""):
-    try:
-        paragraph.style = style_name
-    except KeyError:
-        if fallback_prefix:
-            paragraph.text = fallback_prefix + paragraph.text
+    try: paragraph.style = style_name
+    except KeyError: 
+        if fallback_prefix: paragraph.text = fallback_prefix + paragraph.text
 
 def add_formatted_text(cell, text):
     cell.text = ""
@@ -373,7 +376,7 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_before = Pt(8)
         elif line.startswith('*') or line.startswith('-'):
             clean_text = line.lstrip('*- ').strip()
-            safe_apply_style(p, 'List Bullet', "• ") # SAFE STYLE APPLY
+            safe_apply_style(p, 'List Bullet', "• ")
             _add_rich_text(p, clean_text)
             p.paragraph_format.left_indent = Inches(0.15)
         else:
