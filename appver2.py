@@ -235,10 +235,12 @@ def get_visual_metadata(file_path):
     thumbnail_path = "temp_thumb.jpg"
     result_data = {"datetime_sg": None, "duration": 0, "title": "Meeting_Minutes", "venue": ""}
     try:
+        # Duration
         cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0: result_data["duration"] = float(res.stdout.strip())
 
+        # Vision
         subprocess.run(['ffmpeg', '-i', file_path, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', '-y', thumbnail_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if os.path.exists(thumbnail_path):
@@ -328,7 +330,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                 if "## OVERVIEW ##" in text: overview = text.split("## OVERVIEW ##")[1].split("## DISCUSSION ##")[0].strip()
                 if "## DISCUSSION ##" in text: discussion = text.split("## DISCUSSION ##")[1].split("## NEXT STEPS ##")[0].strip()
                 if "## NEXT STEPS ##" in text: next_steps = text.split("## NEXT STEPS ##")[1].strip()
-                # We ignore separate Client Requests section as it is merged
             except: discussion = text
 
             return {"overview": overview, "discussion": discussion, "next_steps": next_steps, "full_transcript": full_transcript}
@@ -346,6 +347,13 @@ def _add_rich_text(paragraph, text):
             run.bold = True
         else:
             paragraph.add_run(part)
+
+def safe_apply_style(paragraph, style_name, fallback_prefix=""):
+    try:
+        paragraph.style = style_name
+    except KeyError:
+        if fallback_prefix:
+            paragraph.text = fallback_prefix + paragraph.text
 
 def add_formatted_text(cell, text):
     cell.text = ""
@@ -365,7 +373,7 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_before = Pt(8)
         elif line.startswith('*') or line.startswith('-'):
             clean_text = line.lstrip('*- ').strip()
-            p.text = "• "
+            safe_apply_style(p, 'List Bullet', "• ") # SAFE STYLE APPLY
             _add_rich_text(p, clean_text)
             p.paragraph_format.left_indent = Inches(0.15)
         else:
@@ -403,13 +411,14 @@ def add_markdown_to_doc(doc, text):
         if stripped.startswith('##'):
             doc.add_heading(stripped.lstrip('#').strip(), level=2)
         elif stripped.startswith('*') or stripped.startswith('-'):
-            p = doc.add_paragraph(style='List Bullet')
+            p = doc.add_paragraph()
+            safe_apply_style(p, 'List Bullet', "• ")
             _add_rich_text(p, stripped.lstrip('*- ').strip())
         elif stripped:
             p = doc.add_paragraph()
             _add_rich_text(p, stripped)
     
-    if table_data: # Catch end of text table
+    if table_data: 
         t = doc.add_table(rows=len(table_data), cols=max(len(r) for r in table_data))
         t.style = 'Table Grid'
         for i, row in enumerate(table_data):
@@ -439,7 +448,6 @@ if 'gdrive_creds_json' in st.session_state and not st.session_state.gdrive_creds
     except: st.session_state.gdrive_creds_json = None
 
 # Basecamp Auto-Login
-# --- AUTO-LOGIN HANDLER (BASECAMP) ---
 if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.basecamp_token:
     auth_code = st.query_params["code"]
     try:
@@ -450,32 +458,18 @@ if AUTO_LOGIN_MODE and "code" in st.query_params and not st.session_state.baseca
             "redirect_uri": BASECAMP_REDIRECT_URI,
             "code": auth_code
         }
-        
-        # 1. Attempt Token Exchange
         response = requests.post(BASECAMP_TOKEN_URL, data=payload)
-        
-        # 2. Check for errors specifically
         if response.status_code != 200:
             st.error(f"Basecamp Login Error ({response.status_code}): {response.text}")
         else:
             token = response.json()
-            
-            # 3. Save Session
             st.session_state.basecamp_token = token
-            
-            # 4. Fetch User Name
             real_name = fetch_basecamp_name(token)
-            if real_name:
-                st.session_state.user_real_name = real_name
-            
-            # 5. Success & Cleanup
+            if real_name: st.session_state.user_real_name = real_name
             st.toast("✅ Basecamp Login Successful!", icon="🎉")
-            
-            # Clear the code from URL to prevent re-submission error on reload
             st.query_params.clear()
             time.sleep(1)
             st.rerun()
-            
     except Exception as e:
         st.error(f"Auto-login system error: {e}")
 
