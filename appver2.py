@@ -298,7 +298,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             full_transcript += w.word + " "
 
         with st.spinner("Analyzing with Gemini..."):
-            # --- UPDATED PROMPT FOR ROBUST EXTRACTION ---
+            # --- ROBUST PROMPT TO FORCE CONTENT INTO FIELDS ---
             prompt = f"""
             You are an expert meeting secretary. Context: {participants_context}
             Transcript: {full_transcript}
@@ -311,36 +311,32 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             [Brief summary of WHO met and WHAT was discussed (2-3 sentences).]
             
             ## DISCUSSION ##
-            [Detailed bullet points with headers]
+            [Detailed bullet points with headers. Be comprehensive.]
             
             ## NEXT STEPS ##
-            List ALL specific, actionable items. **CRITICAL: Take any specific requests made by the Client and convert them into Action Items here.**
+            List specific actionable items. **IMPORTANT: Merge any Client Requests into this list as actions for the appropriate person.**
             FORMAT:
             * **Action:** [Specific Task] (Assigned to: [Name]) - Deadline: [Time if mentioned]
             """
             text = gemini_model.generate_content(prompt).text
             
-            # --- ROBUST REGEX PARSER ---
+            # --- ROBUST REGEX PARSER (FIXES EMPTY FIELDS) ---
             overview = ""
             discussion = ""
             next_steps = ""
             
             try:
-                # Extract Overview (Look for ## OVERVIEW ## ... ## DISCUSSION ##)
+                # Use Regex to capture content between headers, ignoring casing/spacing
                 ov_match = re.search(r'##\s*OVERVIEW\s*##(.*?)(?=##\s*DISCUSSION|##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
-                if ov_match: overview = ov_match.group(1).strip()
-                
-                # Extract Discussion (Look for ## DISCUSSION ## ... ## NEXT STEPS ##)
                 disc_match = re.search(r'##\s*DISCUSSION\s*##(.*?)(?=##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
-                if disc_match: discussion = disc_match.group(1).strip()
-                
-                # Extract Next Steps (Look for ## NEXT STEPS ## ... End)
                 ns_match = re.search(r'##\s*NEXT STEPS\s*##(.*)', text, re.DOTALL | re.IGNORECASE)
-                if ns_match: next_steps = ns_match.group(1).strip()
                 
-                # Fallback if regex fails completely
-                if not overview and not discussion:
-                    discussion = text # Dump everything so user sees something
+                if ov_match: overview = ov_match.group(1).strip()
+                if disc_match: discussion = disc_match.group(1).strip()
+                if ns_match: next_steps = ns_match.group(1).strip()
+
+                # Safety Fallback
+                if not overview and not discussion: discussion = text
             except: 
                 discussion = text
 
@@ -352,6 +348,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
 
 # --- Markdown Parsers ---
 def _add_rich_text(paragraph, text):
+    """Parses markdown-style **bold** text and applies Word formatting."""
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         if part.startswith('**') and part.endswith('**'):
@@ -366,6 +363,7 @@ def safe_apply_style(paragraph, style_name, fallback_prefix=""):
         if fallback_prefix: paragraph.text = fallback_prefix + paragraph.text
 
 def add_formatted_text(cell, text):
+    """Enhanced parser to handle bullets and bold text correctly in Word table cells."""
     cell.text = ""
     lines = text.split('\n')
     for line in lines:
@@ -383,7 +381,7 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_before = Pt(8)
         elif line.startswith('*') or line.startswith('-'):
             clean_text = line.lstrip('*- ').strip()
-            safe_apply_style(p, 'List Bullet', "• ")
+            safe_apply_style(p, 'List Bullet', "• ") # SAFE STYLE APPLY
             _add_rich_text(p, clean_text)
             p.paragraph_format.left_indent = Inches(0.15)
         else:
@@ -614,7 +612,7 @@ with tab2:
         pname = st.selectbox("Project", [p[0] for p in projs])
         if pname:
             pid = next(p[1] for p in projs if p[0]==pname)
-            tool = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs"])
+            tool = st.selectbox("Where to post?", ["To-dos", "Message Board", "Docs & Files"])
             dock = get_project_tools(sess, pid)
             
             if tool == "To-dos":
