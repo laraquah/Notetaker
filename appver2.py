@@ -48,13 +48,8 @@ try:
     
     # --- AUTO-LOGIN LOGIC ---
     STREAMLIT_APP_URL = st.secrets.get("STREAMLIT_APP_URL", "https://localhost:8501")
-    # Remove trailing slash if present
     REDIRECT_URI = STREAMLIT_APP_URL.rstrip("/")
-    
-    if "localhost" not in STREAMLIT_APP_URL:
-        AUTO_LOGIN_MODE = True
-    else:
-        AUTO_LOGIN_MODE = False
+    AUTO_LOGIN_MODE = "localhost" not in STREAMLIT_APP_URL
 
 except Exception as e:
     st.error(f"Secrets Configuration Error: {e}")
@@ -326,7 +321,7 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
             next_steps = ""
             
             try:
-                # Use Regex to capture content between headers, ignoring casing/spacing
+                # Regex handles varying capitalization or spaces
                 ov_match = re.search(r'##\s*OVERVIEW\s*##(.*?)(?=##\s*DISCUSSION|##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
                 disc_match = re.search(r'##\s*DISCUSSION\s*##(.*?)(?=##\s*NEXT STEPS|$)', text, re.DOTALL | re.IGNORECASE)
                 ns_match = re.search(r'##\s*NEXT STEPS\s*##(.*)', text, re.DOTALL | re.IGNORECASE)
@@ -335,7 +330,6 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
                 if disc_match: discussion = disc_match.group(1).strip()
                 if ns_match: next_steps = ns_match.group(1).strip()
 
-                # Safety Fallback
                 if not overview and not discussion: discussion = text
             except: 
                 discussion = text
@@ -379,7 +373,7 @@ def add_formatted_text(cell, text):
             p.paragraph_format.space_before = Pt(8)
         elif line.startswith('*') or line.startswith('-'):
             clean_text = line.lstrip('*- ').strip()
-            safe_apply_style(p, 'List Bullet', "• ") # SAFE STYLE APPLY
+            safe_apply_style(p, 'List Bullet', "• ") 
             _add_rich_text(p, clean_text)
             p.paragraph_format.left_indent = Inches(0.15)
         else:
@@ -455,7 +449,6 @@ if 'gdrive_creds_json' in st.session_state and not st.session_state.gdrive_creds
 # --- UNIFIED AUTO-LOGIN HANDLER ---
 if "code" in st.query_params:
     auth_code = st.query_params["code"]
-    # Use 'state' param to distinguish (default to basecamp if missing)
     auth_state = st.query_params.get("state", "basecamp") 
     
     # 1. GOOGLE DRIVE LOGIN
@@ -530,7 +523,6 @@ with st.sidebar:
             if st.button("Logout Drive"):
                 st.session_state.gdrive_creds = None; st.session_state.gdrive_creds_json = None; st.rerun()
         else:
-            # Use 'state=google' to distinguish the callback
             f = Flow.from_client_config(
                 GDRIVE_CLIENT_CONFIG, 
                 scopes=["https://www.googleapis.com/auth/drive"], 
@@ -658,7 +650,7 @@ with tab2:
         t.cell(2,1).text = str(time_str)
         t.cell(3,1).text = venue
         
-        # Force correct format: Name (Client) / Name (iFoundries)
+        # Force correct format
         crep_final = crep if "(Client)" in crep else f"{crep} (Client)"
         irep_final = irep if "(iFoundries)" in irep else f"{irep} (iFoundries)"
         
