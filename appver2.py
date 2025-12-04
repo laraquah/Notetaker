@@ -352,11 +352,15 @@ def get_structured_notes_google(audio_file_path, file_name, participants_context
 
 # --- Markdown Parsers ---
 def _add_rich_text(paragraph, text):
+    # Splits by **bold**, keeping the delimiters
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         if part.startswith('**') and part.endswith('**'):
-            run = paragraph.add_run(part[2:-2])
-            run.bold = True
+            # Safely remove ** and add bold
+            clean_part = part[2:-2]
+            if clean_part:
+                run = paragraph.add_run(clean_part)
+                run.bold = True
         else:
             paragraph.add_run(part)
 
@@ -366,7 +370,7 @@ def safe_apply_style(paragraph, style_name, fallback_prefix=""):
         if fallback_prefix: paragraph.text = fallback_prefix + paragraph.text
 
 # -------------------------------------------------------------------------
-# UPDATED: Improved Formatting Function
+# UPDATED: Improved Formatting Function with Regex Fix
 # -------------------------------------------------------------------------
 def add_formatted_text(cell, text):
     """
@@ -376,7 +380,6 @@ def add_formatted_text(cell, text):
     # 1. Clear existing content in the cell
     cell.text = ""
     # 2. Get the empty paragraph that docx automatically leaves after clearing
-    # This prevents the "blank line at the top" issue.
     p = cell.paragraphs[0]
     
     lines = text.split('\n')
@@ -395,24 +398,28 @@ def add_formatted_text(cell, text):
         # --- Logic for formatting ---
         if line.startswith('##'):
             # HEADING STYLE (e.g. ## Topic)
-            clean_title = line.lstrip('#').strip().upper() # Uppercase for separation
+            clean_title = line.lstrip('#').strip().upper() 
             run = p.add_run(clean_title)
             run.bold = True
-            run.font.size = Pt(10) # Slightly larger/distinct
-            run.font.color.rgb = RGBColor(60, 60, 60) # Dark Grey for professional look
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(60, 60, 60)
             
-            p.paragraph_format.space_before = Pt(12) # Breathing room above
-            p.paragraph_format.space_after = Pt(4)   # Slight space below
+            p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(4)
 
         elif line.startswith('*') or line.startswith('-'):
             # BULLET LIST STYLE
-            clean_text = line.lstrip('*- ').strip()
+            # Use Regex to remove ONLY the leading bullet and space
+            # This PRESERVES the ** if the text is like "* **Title**: ..."
+            clean_text = re.sub(r'^[\*\-]\s+', '', line).strip()
+            
             safe_apply_style(p, 'List Bullet', "• ")
             
-            # Use helper to handle bolding inside the bullet point (e.g. **Action:**)
+            # Helper handles the rest
             _add_rich_text(p, clean_text)
             
-            p.paragraph_format.space_after = Pt(2)
+            # Better spacing for lists
+            p.paragraph_format.space_after = Pt(6) 
             p.paragraph_format.left_indent = Inches(0.15)
             
         else:
@@ -453,7 +460,9 @@ def add_markdown_to_doc(doc, text):
             doc.add_heading(stripped.lstrip('#').strip(), level=2)
         elif stripped.startswith('*') or stripped.startswith('-'):
             p = doc.add_paragraph(style='List Bullet')
-            _add_rich_text(p, stripped.lstrip('*- ').strip())
+            # Fix here too for consistency
+            clean_text = re.sub(r'^[\*\-]\s+', '', stripped).strip()
+            _add_rich_text(p, clean_text)
         elif stripped:
             p = doc.add_paragraph()
             _add_rich_text(p, stripped)
