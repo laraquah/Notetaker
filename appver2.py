@@ -401,6 +401,8 @@ def add_formatted_text(cell, text):
             clean_title = line.lstrip('#').strip().upper() 
             run = p.add_run(clean_title)
             run.bold = True
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(60, 60, 60)
             
             p.paragraph_format.space_before = Pt(12)
             p.paragraph_format.space_after = Pt(4)
@@ -542,56 +544,23 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    
-    # -----------------------------------------------------
-    # IMPLEMENTED FIX: Step 2: Google Drive Authentication
-    # -----------------------------------------------------
     st.markdown("### Step 2: Google Drive")
-    if not st.session_state.basecamp_token: 
-        st.info("Please login to Basecamp first.")
+    if not st.session_state.basecamp_token: st.info("Please login to Basecamp first.")
     else:
         if st.session_state.gdrive_creds:
             st.success("✅ Connected")
             if st.button("Logout Drive"):
-                st.session_state.gdrive_creds = None
-                st.session_state.gdrive_creds_json = None
-                if 'flow' in st.session_state: 
-                    del st.session_state.flow
-                if 'auth_url' in st.session_state:
-                    del st.session_state.auth_url
-                st.rerun()
+                st.session_state.gdrive_creds = None; st.session_state.gdrive_creds_json = None; st.rerun()
         else:
-            # Initialize the flow and URL only if they don't exist in session_state
-            if 'flow' not in st.session_state:
-                st.session_state.flow = Flow.from_client_config(
-                    GDRIVE_CLIENT_CONFIG, 
-                    scopes=["https://www.googleapis.com/auth/drive"], 
-                    redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-                )
-                st.session_state.auth_url, _ = st.session_state.flow.authorization_url(prompt='consent')
-            
-            # Use the persistent URL
-            st.link_button("Login to Drive", st.session_state.auth_url)
-            
+            f = Flow.from_client_config(GDRIVE_CLIENT_CONFIG, scopes=["https://www.googleapis.com/auth/drive"], redirect_uri="urn:ietf:wg:oauth:2.0:oob")
+            url, _ = f.authorization_url(prompt='consent')
+            st.link_button("Login to Drive", url)
             c = st.text_input("Paste Drive Code")
             if c:
-                try:
-                    # Use the same flow object that generated the URL to fetch the token
-                    st.session_state.flow.fetch_token(code=c)
-                    st.session_state.gdrive_creds = st.session_state.flow.credentials
-                    st.session_state.gdrive_creds_json = st.session_state.flow.credentials.to_json()
-                    
-                    # Cleanup flow after success
-                    del st.session_state.flow
-                    del st.session_state.auth_url
-                    st.rerun()
-                except Exception as auth_e:
-                    st.error(f"Config Error: {auth_e}")
-                    # If it fails, clear the flow so the user can try again
-                    if 'flow' in st.session_state: 
-                        del st.session_state.flow
-                    if 'auth_url' in st.session_state:
-                        del st.session_state.auth_url
+                f.fetch_token(code=c)
+                st.session_state.gdrive_creds = f.credentials
+                st.session_state.gdrive_creds_json = f.credentials.to_json()
+                st.rerun()
 
 if not (st.session_state.basecamp_token and st.session_state.gdrive_creds):
     st.title("🔒 Access Restricted"); st.warning("Please login to both services."); st.stop()
